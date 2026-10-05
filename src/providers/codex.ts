@@ -50,6 +50,7 @@ import {
   type PiCodexCredentialInspection,
   type PiCodexCredentialResolution,
 } from "./pi-codex-credential.js";
+import { readCodexPool, resolveCodexRegistryPath } from "./codex-pool.js";
 
 const ENDPOINTS = [
   "https://chatgpt.com/backend-api/wham/usage",
@@ -176,6 +177,13 @@ async function fetchSingleWinnerQuota(
 ): Promise<ProviderQuota> {
   if (isProfileOnly(options))
     return fetchQuotaWithDependencies(dependencies, options);
+  const pool = readCodexPool();
+  if (pool.kind === "success") {
+    return pool.quota;
+  }
+  if (pool.kind === "malformed") {
+    return pool.failure;
+  }
   const nativeState = readCredentialState();
   let builtinResolution: PiCodexCredentialResolution;
   try {
@@ -234,6 +242,10 @@ type CodexAccountContext =
 async function discoverCodexAccounts(
   dependencies: CodexDependencies,
 ): Promise<ProviderAccount[] | undefined> {
+  const pool = readCodexPool();
+  if (pool.kind !== "missing") {
+    return undefined;
+  }
   const ids = await listPiCodexProviderIds(dependencies);
   if (
     ids.length === 0 ||
@@ -1003,7 +1015,17 @@ async function inspectAuthWithDependencies(
   }
   const authFile = codexAuthFile();
   const credentialState = readCredentialState(authFile);
-  const sources: AuthSourceReport[] = [credentialState.source];
+  const sources: AuthSourceReport[] = [];
+  const pool = readCodexPool();
+  if (pool.kind !== "missing") {
+    sources.push({
+      source: "pool-registry",
+      path: resolveCodexRegistryPath(),
+      status: pool.kind === "success" ? "available" : "invalid",
+      error: pool.kind === "malformed" ? pool.error : undefined,
+    });
+  }
+  sources.push(credentialState.source);
   if (!account || account.includesBuiltinPi) {
     try {
       sources.push(

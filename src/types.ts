@@ -358,11 +358,33 @@ export type ProviderQuota = {
   };
   attempts?: SourceAttempt[];
   /**
+   * Account-pool aggregation detail. Preserved under `--full`, demoted in
+   * minimal default `--json`.
+   */
+  pool?: PoolDetail;
+  /**
    * Sparse JSON marker, present only when this lane has positive evidence it
    * is not set up. Default TOON omits those providers; `--json` keeps the lane.
    * Applied at serialization from `providerPresence`, never by an adapter.
    */
   notSetUp?: true;
+};
+
+export type PoolAccountDetail = {
+  email?: string;
+  accountKey?: string;
+  plan?: string;
+  status: "available" | "unavailable";
+  cooldowns?: Record<string, number>;
+  fetchedAt?: string;
+  windows: QuotaWindow[];
+};
+
+export type PoolDetail = {
+  source: "cpa" | "agy-multi";
+  activeAccount?: string;
+  autoSwitch?: Record<string, unknown>;
+  accounts: PoolAccountDetail[];
 };
 
 export type QuotaAxiResponse = {

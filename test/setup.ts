@@ -54,6 +54,19 @@ process.env.XDG_DATA_HOME = join(
   tmpdir(),
   `quota-axi-test-data-${process.pid}-${randomUUID()}`,
 );
+// Codex CPA pool registry must never come from the developer's real
+// ~/.codex/accounts/registry.json during tests.
+process.env.CODEX_REGISTRY_PATH = join(
+  tmpdir(),
+  `quota-axi-test-no-codex-registry-${process.pid}-${randomUUID()}.json`,
+);
+
+// Antigravity agy-multi pool state must never come from the developer's real
+// environment during tests.
+process.env.AGY_MULTI_STATE_PATH = join(
+  tmpdir(),
+  `quota-axi-test-no-agy-multi-state-${process.pid}-${randomUUID()}.json`,
+);
 delete process.env.WINDSURF_API_KEY;
 delete process.env.WINDSURF_API_SERVER_URL;
 

@@ -622,6 +622,7 @@ export function redactedResponse(
       ...provider,
       account: undefined,
       attempts: undefined,
+      pool: undefined,
     })),
   };
 }

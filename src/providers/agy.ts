@@ -31,6 +31,7 @@ import {
   statusFromError,
   successProvider,
 } from "./common.js";
+import { readAgyMultiPool, resolveAgyMultiStatePath } from "./agy-pool.js";
 
 const QUOTA_SUMMARY_PATH =
   "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
@@ -107,6 +108,9 @@ export const agyAdapter: ProviderAdapter = {
 export async function fetchQuota(
   _options: ProviderOptions,
 ): Promise<ProviderQuota> {
+  const pool = readAgyMultiPool();
+  if (pool.kind === "success") return pool.quota;
+  if (pool.kind === "malformed") return pool.failure;
   return fetchQuotaWithRuntime(defaultRuntime);
 }
 
@@ -203,6 +207,20 @@ export async function fetchQuotaWithRuntime(
 export async function inspectAuth(
   _options: ProviderOptions,
 ): Promise<AuthProviderReport> {
+  const pool = readAgyMultiPool();
+  if (pool.kind !== "missing") {
+    return {
+      provider: "agy",
+      sources: [
+        {
+          source: "pool-state",
+          path: resolveAgyMultiStatePath(),
+          status: pool.kind === "success" ? "available" : "invalid",
+          error: pool.kind === "malformed" ? pool.error : undefined,
+        },
+      ],
+    };
+  }
   return inspectAuthWithRuntime(defaultRuntime);
 }
 
