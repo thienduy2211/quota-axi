@@ -54,6 +54,12 @@ process.env.XDG_DATA_HOME = join(
   tmpdir(),
   `quota-axi-test-data-${process.pid}-${randomUUID()}`,
 );
+// Codex CPA pool registry must never come from the developer's real
+// ~/.codex/accounts/registry.json during tests.
+process.env.CODEX_REGISTRY_PATH = join(
+  tmpdir(),
+  `quota-axi-test-no-codex-registry-${process.pid}-${randomUUID()}.json`,
+);
 delete process.env.WINDSURF_API_KEY;
 delete process.env.WINDSURF_API_SERVER_URL;
 
