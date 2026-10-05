@@ -19,6 +19,7 @@ const OPTIONS: ProviderOptions = {
 describe("Antigravity agy-multi pool aggregation", () => {
   let tempDir: string;
   let stateFile: string;
+  const initialAgyMultiStatePath = process.env.AGY_MULTI_STATE_PATH;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "quota-axi-agy-pool-test-"));
@@ -27,7 +28,11 @@ describe("Antigravity agy-multi pool aggregation", () => {
   });
 
   afterEach(() => {
-    delete process.env.AGY_MULTI_STATE_PATH;
+    if (initialAgyMultiStatePath !== undefined) {
+      process.env.AGY_MULTI_STATE_PATH = initialAgyMultiStatePath;
+    } else {
+      delete process.env.AGY_MULTI_STATE_PATH;
+    }
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -64,6 +69,24 @@ describe("Antigravity agy-multi pool aggregation", () => {
     expect(result.kind).toBe("malformed");
     if (result.kind === "malformed") {
       expect(result.error).toBe("missing_quota_cache");
+    }
+  });
+
+  it("returns malformed when no account reports valid quota usage", () => {
+    const fixture = {
+      active: "user1@example.com",
+      quotaCache: {
+        "user1@example.com": {
+          fetchedMs: Date.now(),
+          groups: {},
+        },
+      },
+    };
+    writeFileSync(stateFile, JSON.stringify(fixture), "utf8");
+    const result = readAgyMultiPool({ statePath: stateFile });
+    expect(result.kind).toBe("malformed");
+    if (result.kind === "malformed") {
+      expect(result.error).toBe("missing_quota_usage");
     }
   });
 
@@ -407,6 +430,27 @@ describe("Antigravity agy-multi pool aggregation", () => {
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
+    expect(result.quota.state.stale).toBe(true);
+    expect(result.quota.state.status).toBe("stale");
+  });
+
+  it("marks pool cache stale when fetchedMs is absent across accounts", () => {
+    const fixture = {
+      active: "user1@example.com",
+      quotaCache: {
+        "user1@example.com": {
+          groups: {
+            gemini: {
+              "5h": { fraction: 0.8, resetMs: Date.now() + 3600_000 },
+            },
+          },
+        },
+      },
+    };
+    writeFileSync(stateFile, JSON.stringify(fixture), "utf8");
+    const result = readAgyMultiPool({ statePath: stateFile });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
     expect(result.quota.state.stale).toBe(true);
     expect(result.quota.state.status).toBe("stale");
   });

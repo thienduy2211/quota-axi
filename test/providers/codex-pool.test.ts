@@ -23,6 +23,7 @@ const OPTIONS: ProviderOptions = {
 describe("Codex CPA pool aggregation", () => {
   let tempDir: string;
   let registryFile: string;
+  const initialCodexRegistryPath = process.env.CODEX_REGISTRY_PATH;
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), "quota-axi-codex-pool-test-"));
@@ -31,7 +32,11 @@ describe("Codex CPA pool aggregation", () => {
   });
 
   afterEach(() => {
-    delete process.env.CODEX_REGISTRY_PATH;
+    if (initialCodexRegistryPath !== undefined) {
+      process.env.CODEX_REGISTRY_PATH = initialCodexRegistryPath;
+    } else {
+      delete process.env.CODEX_REGISTRY_PATH;
+    }
     rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -71,6 +76,92 @@ describe("Codex CPA pool aggregation", () => {
     if (result.kind === "malformed") {
       expect(result.error).toBe("no_accounts_in_registry");
     }
+  });
+
+  it("returns malformed when no account reports valid quota usage", () => {
+    const fixture = {
+      accounts: [
+        {
+          account_key: "acc-1",
+          email: "user1@example.com",
+        },
+        {
+          account_key: "acc-2",
+          email: "user2@example.com",
+          last_usage: {},
+        },
+      ],
+    };
+    writeFileSync(registryFile, JSON.stringify(fixture), "utf8");
+    const result = readCodexPool({ registryPath: registryFile });
+    expect(result.kind).toBe("malformed");
+    if (result.kind === "malformed") {
+      expect(result.error).toBe("missing_quota_usage");
+    }
+  });
+
+  it("aggregates only over accounts reporting each window and omits missing windows from pool accounts", () => {
+    const nowS = 1_700_000_000;
+    const nowMs = nowS * 1000;
+
+    const fixture = {
+      accounts: [
+        {
+          account_key: "acc-1",
+          email: "user1@example.com",
+          last_used_at: nowS - 60,
+          last_usage: {
+            primary: { used_percent: 20, resets_at: nowS + 3600 },
+          },
+        },
+        {
+          account_key: "acc-2",
+          email: "user2@example.com",
+          last_used_at: nowS - 120,
+          last_usage: {
+            secondary: { used_percent: 40, resets_at: nowS + 7200 },
+          },
+        },
+        {
+          account_key: "acc-3",
+          email: "user3@example.com",
+          last_used_at: nowS - 180,
+        },
+      ],
+    };
+
+    writeFileSync(registryFile, JSON.stringify(fixture), "utf8");
+
+    const result = readCodexPool({ registryPath: registryFile, nowMs });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    const primary = result.quota.windows.find((w) => w.id === "five_hour");
+    expect(primary).toBeDefined();
+    expect(primary?.percentRemaining).toBe(80);
+    expect(primary?.percentUsed).toBe(20);
+
+    const secondary = result.quota.windows.find((w) => w.id === "weekly");
+    expect(secondary).toBeDefined();
+    expect(secondary?.percentRemaining).toBe(60);
+    expect(secondary?.percentUsed).toBe(40);
+
+    const acc1 = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "acc-1",
+    );
+    expect(acc1?.windows).toHaveLength(1);
+    expect(acc1?.windows[0].id).toBe("five_hour");
+
+    const acc2 = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "acc-2",
+    );
+    expect(acc2?.windows).toHaveLength(1);
+    expect(acc2?.windows[0].id).toBe("weekly");
+
+    const acc3 = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "acc-3",
+    );
+    expect(acc3?.windows).toHaveLength(0);
   });
 
   it("aggregates all-healthy pool of 4 accounts accurately", () => {
@@ -257,6 +348,33 @@ describe("Codex CPA pool aggregation", () => {
           account_key: "acc-1",
           email: "user@example.com",
           last_used_at: staleUsageS,
+          last_usage: {
+            primary: { used_percent: 10, resets_at: nowS + 3600 },
+            secondary: { used_percent: 20, resets_at: nowS + 86400 },
+          },
+        },
+      ],
+    };
+
+    writeFileSync(registryFile, JSON.stringify(fixture), "utf8");
+
+    const result = readCodexPool({ registryPath: registryFile, nowMs });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.quota.state.stale).toBe(true);
+    expect(result.quota.state.status).toBe("stale");
+  });
+
+  it("marks pool cache stale when lastUsageAt is absent across accounts", () => {
+    const nowS = 1_700_000_000;
+    const nowMs = nowS * 1000;
+
+    const fixture = {
+      accounts: [
+        {
+          account_key: "acc-1",
+          email: "user@example.com",
           last_usage: {
             primary: { used_percent: 10, resets_at: nowS + 3600 },
             secondary: { used_percent: 20, resets_at: nowS + 86400 },

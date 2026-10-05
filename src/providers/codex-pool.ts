@@ -99,15 +99,19 @@ export function readCodexPool(
       ? root.active_account_key
       : undefined;
 
+  type ParsedAccountWindow = {
+    usedPercent: number;
+    remainingPercent: number;
+    resetsAt?: number;
+  };
+
   type ParsedAccount = {
     accountKey: string;
     email?: string;
     plan?: string;
     lastUsageAt?: number;
-    primaryUsed: number;
-    primaryResetsAt?: number;
-    secondaryUsed: number;
-    secondaryResetsAt?: number;
+    primary?: ParsedAccountWindow;
+    secondary?: ParsedAccountWindow;
   };
 
   const parsedAccounts: ParsedAccount[] = [];
@@ -128,39 +132,35 @@ export function readCodexPool(
           ? acc.last_used_at
           : undefined;
 
-    const primary = acc.last_usage?.primary;
-    const primaryUsed =
-      typeof primary?.used_percent === "number" &&
-      Number.isFinite(primary.used_percent)
-        ? primary.used_percent
-        : 0;
-    const primaryResetsAt =
-      typeof primary?.resets_at === "number" &&
-      Number.isFinite(primary.resets_at)
-        ? primary.resets_at
-        : undefined;
-
-    const secondary = acc.last_usage?.secondary;
-    const secondaryUsed =
-      typeof secondary?.used_percent === "number" &&
-      Number.isFinite(secondary.used_percent)
-        ? secondary.used_percent
-        : 0;
-    const secondaryResetsAt =
-      typeof secondary?.resets_at === "number" &&
-      Number.isFinite(secondary.resets_at)
-        ? secondary.resets_at
-        : undefined;
+    const parseWindow = (
+      data:
+        | {
+            used_percent?: unknown;
+            resets_at?: unknown;
+          }
+        | undefined,
+    ): ParsedAccountWindow | undefined => {
+      if (!data || typeof data !== "object") return undefined;
+      const rawUsed = data.used_percent;
+      if (typeof rawUsed !== "number" || !Number.isFinite(rawUsed)) {
+        return undefined;
+      }
+      const usedPercent = clampPercent(rawUsed);
+      const remainingPercent = clampPercent(100 - rawUsed);
+      const resetsAt =
+        typeof data.resets_at === "number" && Number.isFinite(data.resets_at)
+          ? data.resets_at
+          : undefined;
+      return { usedPercent, remainingPercent, resetsAt };
+    };
 
     parsedAccounts.push({
       accountKey,
       email,
       plan,
       lastUsageAt,
-      primaryUsed,
-      primaryResetsAt,
-      secondaryUsed,
-      secondaryResetsAt,
+      primary: parseWindow(acc.last_usage?.primary),
+      secondary: parseWindow(acc.last_usage?.secondary),
     });
   }
 
@@ -172,68 +172,74 @@ export function readCodexPool(
     };
   }
 
-  const n = parsedAccounts.length;
+  function aggregateWindow(
+    extractor: (a: ParsedAccount) => ParsedAccountWindow | undefined,
+    id: string,
+    label: string,
+    kind: QuotaWindow["kind"],
+    windowSeconds: number,
+  ): QuotaWindow | undefined {
+    const items = parsedAccounts
+      .map(extractor)
+      .filter((w): w is ParsedAccountWindow => Boolean(w));
+    if (items.length === 0) return undefined;
 
-  // Primary (5h) window aggregation
-  const sumPrimaryRemaining = parsedAccounts.reduce((sum, acc) => {
-    return sum + clampPercent(100 - acc.primaryUsed);
-  }, 0);
-  const primaryRemaining = clampPercent(sumPrimaryRemaining / n);
-  const primaryUsed = clampPercent(100 - primaryRemaining);
+    const sumRemaining = items.reduce(
+      (sum, item) => sum + item.remainingPercent,
+      0,
+    );
+    const percentRemaining = clampPercent(sumRemaining / items.length);
+    const percentUsed = clampPercent(100 - percentRemaining);
 
-  const futurePrimaryResets = parsedAccounts
-    .map((a) => a.primaryResetsAt)
-    .filter((r): r is number => r !== undefined && r > nowS);
-  const pastPrimaryResets = parsedAccounts
-    .map((a) => a.primaryResetsAt)
-    .filter((r): r is number => r !== undefined);
-  const primaryResetsAt =
-    futurePrimaryResets.length > 0
-      ? Math.min(...futurePrimaryResets)
-      : pastPrimaryResets.length > 0
-        ? Math.max(...pastPrimaryResets)
-        : undefined;
+    const futureResets = items
+      .map((item) => item.resetsAt)
+      .filter((r): r is number => r !== undefined && r > nowS);
+    const pastResets = items
+      .map((item) => item.resetsAt)
+      .filter((r): r is number => r !== undefined);
 
-  // Secondary (weekly) window aggregation
-  const sumSecondaryRemaining = parsedAccounts.reduce((sum, acc) => {
-    return sum + clampPercent(100 - acc.secondaryUsed);
-  }, 0);
-  const secondaryRemaining = clampPercent(sumSecondaryRemaining / n);
-  const secondaryUsed = clampPercent(100 - secondaryRemaining);
+    const chosenResetS =
+      futureResets.length > 0
+        ? Math.min(...futureResets)
+        : pastResets.length > 0
+          ? Math.max(...pastResets)
+          : undefined;
 
-  const futureSecondaryResets = parsedAccounts
-    .map((a) => a.secondaryResetsAt)
-    .filter((r): r is number => r !== undefined && r > nowS);
-  const pastSecondaryResets = parsedAccounts
-    .map((a) => a.secondaryResetsAt)
-    .filter((r): r is number => r !== undefined);
-  const secondaryResetsAt =
-    futureSecondaryResets.length > 0
-      ? Math.min(...futureSecondaryResets)
-      : pastSecondaryResets.length > 0
-        ? Math.max(...pastSecondaryResets)
-        : undefined;
+    return {
+      id,
+      label,
+      kind,
+      percentUsed,
+      percentRemaining,
+      windowSeconds,
+      resetsAt: parseEpochOrIso(chosenResetS),
+    };
+  }
 
   const headlineWindows: QuotaWindow[] = [
-    {
-      id: "five_hour",
-      label: "session",
-      kind: "session",
-      percentUsed: primaryUsed,
-      percentRemaining: primaryRemaining,
-      windowSeconds: FIVE_HOURS_SECONDS,
-      resetsAt: parseEpochOrIso(primaryResetsAt),
-    },
-    {
-      id: "weekly",
-      label: "week",
-      kind: "weekly",
-      percentUsed: secondaryUsed,
-      percentRemaining: secondaryRemaining,
-      windowSeconds: WEEK_SECONDS,
-      resetsAt: parseEpochOrIso(secondaryResetsAt),
-    },
-  ];
+    aggregateWindow(
+      (a) => a.primary,
+      "five_hour",
+      "session",
+      "session",
+      FIVE_HOURS_SECONDS,
+    ),
+    aggregateWindow(
+      (a) => a.secondary,
+      "weekly",
+      "week",
+      "weekly",
+      WEEK_SECONDS,
+    ),
+  ].filter((w): w is QuotaWindow => Boolean(w));
+
+  if (headlineWindows.length === 0) {
+    return {
+      kind: "malformed",
+      error: "missing_quota_usage",
+      failure: poolMalformedFailure("missing_quota_usage"),
+    };
+  }
 
   // Freshness & staleness calculation
   const latestUsageTimes = parsedAccounts
@@ -241,11 +247,13 @@ export function readCodexPool(
     .filter((t): t is number => t !== undefined);
   const maxUsageS =
     latestUsageTimes.length > 0 ? Math.max(...latestUsageTimes) : undefined;
-  const isResetExpired =
-    (primaryResetsAt !== undefined && primaryResetsAt <= nowS) ||
-    (secondaryResetsAt !== undefined && secondaryResetsAt <= nowS);
+  const isResetExpired = headlineWindows.some((w) => {
+    if (!w.resetsAt) return false;
+    const ms = Date.parse(w.resetsAt);
+    return Number.isFinite(ms) && ms <= nowMs;
+  });
   const isUsageOld =
-    maxUsageS !== undefined ? nowS - maxUsageS > STALE_MS / 1000 : false;
+    maxUsageS !== undefined ? nowS - maxUsageS > STALE_MS / 1000 : true;
   const isStale = isResetExpired || isUsageOld;
 
   const refreshedAt =
@@ -289,32 +297,39 @@ export function readCodexPool(
       source: "cpa",
       activeAccount: activeAccount?.email ?? activeAccountKey,
       autoSwitch,
-      accounts: parsedAccounts.map((a) => ({
-        email: a.email,
-        accountKey: a.accountKey,
-        plan: a.plan,
-        status: "available",
-        windows: [
-          {
+      accounts: parsedAccounts.map((a) => {
+        const accWindows: QuotaWindow[] = [];
+        if (a.primary) {
+          accWindows.push({
             id: "five_hour",
             label: "session",
             kind: "session",
-            percentUsed: a.primaryUsed,
-            percentRemaining: clampPercent(100 - a.primaryUsed),
+            percentUsed: a.primary.usedPercent,
+            percentRemaining: a.primary.remainingPercent,
             windowSeconds: FIVE_HOURS_SECONDS,
-            resetsAt: parseEpochOrIso(a.primaryResetsAt),
-          },
-          {
+            resetsAt: parseEpochOrIso(a.primary.resetsAt),
+          });
+        }
+        if (a.secondary) {
+          accWindows.push({
             id: "weekly",
             label: "week",
             kind: "weekly",
-            percentUsed: a.secondaryUsed,
-            percentRemaining: clampPercent(100 - a.secondaryUsed),
+            percentUsed: a.secondary.usedPercent,
+            percentRemaining: a.secondary.remainingPercent,
             windowSeconds: WEEK_SECONDS,
-            resetsAt: parseEpochOrIso(a.secondaryResetsAt),
-          },
-        ],
-      })),
+            resetsAt: parseEpochOrIso(a.secondary.resetsAt),
+          });
+        }
+
+        return {
+          email: a.email,
+          accountKey: a.accountKey,
+          plan: a.plan,
+          status: "available",
+          windows: accWindows,
+        };
+      }),
     },
     state: {
       status: isStale ? "stale" : "fresh",

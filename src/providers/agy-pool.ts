@@ -265,6 +265,14 @@ export function readAgyMultiPool(
     ),
   ].filter((w): w is QuotaWindow => Boolean(w));
 
+  if (headlineWindows.length === 0) {
+    return {
+      kind: "malformed",
+      error: "missing_quota_usage",
+      failure: poolMalformedFailure("missing_quota_usage"),
+    };
+  }
+
   // Freshness & staleness calculation
   const fetchedTimes = parsedAccounts
     .map((a) => a.fetchedMs)
