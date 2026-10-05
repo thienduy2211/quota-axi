@@ -59,7 +59,7 @@ Structured into three concise decision blocks:
 ### 2. JSON Tier Splitting (`--json` vs `--full`)
 
 - `--json`: Normalized quota model with derivation inputs demoted to `--full`.
-- `--full`: Includes account identities, diagnostic logs, and per-source attempts.
+- `--full`: Includes account identities, diagnostic logs, per-source attempts, and pool aggregation detail.
 - **Demotion Rule**: Demote at renderer serialization time only (`quotaJsonReport` in `src/render.ts`). The in-memory model retains all fields so `--tui` and `--full` have full context.
 
 ### 3. Human Terminal Interface (`--tui`)

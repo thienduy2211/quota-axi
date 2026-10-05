@@ -28,9 +28,10 @@ This reference details the credential sources, endpoint contracts, quota window 
 ## 2. OpenAI Codex (`codex`)
 
 - **Credential Sources** (evaluated in order):
-  1. Native `$CODEX_HOME/auth.json` or `~/.codex/auth.json` OAuth.
-  2. Pi `openai-codex` and any sibling `openai-codex-*` entries in the same Pi `auth.json`.
-  3. CLI fallback via the `app-server` JSON-RPC probe.
+  1. CPA pool registry (`$CODEX_REGISTRY_PATH`, else `$CODEX_HOME/accounts/registry.json`, else `~/.codex/accounts/registry.json`). When present, aggregates quota across pool accounts reporting usage into a single coalesced pool report and bypasses multi-account Pi discovery.
+  2. Native `$CODEX_HOME/auth.json` or `~/.codex/auth.json` OAuth.
+  3. Pi `openai-codex` and any sibling `openai-codex-*` entries in the same Pi `auth.json`.
+  4. CLI fallback via the `app-server` JSON-RPC probe.
 - **Multi-Account Lanes**:
   - `src/providers/accounts.ts` collects distinct Pi entries and the native `codex-home` lane.
   - Accounts are matched and deduplicated on the ChatGPT account ID reported by the probe/store, never on email or token strings.
@@ -121,7 +122,7 @@ This reference details the credential sources, endpoint contracts, quota window 
 
 ## 9. Google Antigravity (`agy`)
 
-- **Discovery & Transport**: Prefers installed CLI command `agy -p "/quota" --output-format json` (bounded read, not an agent session). Falls back to active loopback endpoint.
+- **Discovery & Transport**: Checks `agy-multi` pool state (`$AGY_MULTI_STATE_PATH`, else `$XDG_DATA_HOME/agy-multi/state.json`, else `~/.local/share/agy-multi/state.json`) first. When present, aggregates Gemini and Claude/GPT 5-hour and weekly windows across pool accounts reporting usage and tracks per-account cooldowns. When missing, prefers installed CLI command `agy -p "/quota" --output-format json` (bounded read, not an agent session), falling back to active loopback endpoint.
 - **CSRF Handling**: Loopback 401 with `missing CSRF token` is treated as `unavailable`, preserving disk cache.
 - **Stale Resets**: Readings with `resetsAt` in the past are marked stale.
 - **Safety**: Antigravity is strictly read-only: never reads memory, signs in, mutates config, or contacts unowned ports.
