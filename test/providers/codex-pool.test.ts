@@ -530,11 +530,8 @@ describe("Codex CPA pool aggregation", () => {
     expect(minimalJson6.providers[0].accountKey).toBe("codex-home");
   });
 
-  it("resolves CPA state directory from CPA_DIR, CLI_PROXY_API_DIR, or default ~/.cli-proxy-api", () => {
+  it("resolves CPA state directory from CPA_DIR or default ~/.cli-proxy-api", () => {
     expect(resolveCpaStateDir({ CPA_DIR: "/custom/cpa" })).toBe("/custom/cpa");
-    expect(resolveCpaStateDir({ CLI_PROXY_API_DIR: "/custom/cli-proxy" })).toBe(
-      "/custom/cli-proxy",
-    );
   });
 
   it("fixture .cds dir with one cooling + one active credential yields earliest recovery = the cooling credential's time", () => {
@@ -619,6 +616,10 @@ describe("Codex CPA pool aggregation", () => {
     );
     expect(activeAccount).toBeDefined();
     expect(activeAccount?.status).toBe("active");
+    expect(activeAccount?.nextRecoverAt).toBeUndefined();
+    expect(activeAccount?.nextRetryAfter).toBeUndefined();
+    expect(activeAccount?.plan).toBeUndefined();
+    expect(coolingAccount?.plan).toBeUndefined();
     expect(activeAccount?.windows[0]?.resetText).toBe("pool serving");
     expect(activeAccount?.windows[0]?.percentRemaining).toBeUndefined();
 
@@ -918,5 +919,156 @@ describe("Codex CPA pool aggregation", () => {
     expect(poolSource).toBeDefined();
     expect(poolSource?.status).toBe("available");
     expect(poolSource?.path).toBe(cpaDir);
+  });
+
+  it("all-cooling CPA pool without recovery timestamps emits cooling resetText, never pool serving", () => {
+    const cpaDir = join(tempDir, "cpa-cooling-no-timestamp");
+    mkdirSync(cpaDir, { recursive: true });
+
+    writeFileSync(
+      join(cpaDir, "codex-1.cds"),
+      JSON.stringify({
+        auth_id: "codex-1.json",
+        provider: "codex",
+        status: "cooling",
+      }),
+      "utf8",
+    );
+
+    writeFileSync(
+      join(cpaDir, "codex-2.cds"),
+      JSON.stringify({
+        auth_id: "codex-2.json",
+        provider: "codex",
+        quota: { exceeded: true },
+      }),
+      "utf8",
+    );
+
+    const result = readCodexPool({ cpaDir });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.windows[0].resetsAt).toBeUndefined();
+    expect(result.quota.windows[0].resetText).toBe("cooling");
+    expect(result.quota.pool?.accounts).toHaveLength(2);
+    for (const acc of result.quota.pool?.accounts ?? []) {
+      expect(acc.status).toBe("cooling");
+      expect(acc.nextRetryAfter).toBeUndefined();
+      expect(acc.nextRecoverAt).toBeUndefined();
+      expect(acc.windows[0].resetText).toBe("cooling");
+      expect(acc.windows[0].resetsAt).toBeUndefined();
+    }
+  });
+
+  it("ignores stale root retry timestamp when root status is active and record is cooling", () => {
+    const cpaDir = join(tempDir, "cpa-stale-root-time");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const staleRootTime = "2026-01-01T00:00:00.000Z";
+    const futureCoolingTime = "2026-10-10T14:17:55.000Z";
+
+    writeFileSync(
+      join(cpaDir, "codex-stale-root.cds"),
+      JSON.stringify({
+        auth_id: "codex-mixed.json",
+        provider: "codex",
+        status: "active",
+        next_retry_after: staleRootTime,
+        quota: { exceeded: false, next_recover_at: staleRootTime },
+        records: [
+          {
+            provider: "codex",
+            status: "cooling",
+            next_retry_after: futureCoolingTime,
+            quota: { exceeded: true, next_recover_at: futureCoolingTime },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = readCodexPool({ cpaDir });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    const acc = result.quota.pool?.accounts[0];
+    expect(acc?.status).toBe("cooling");
+    expect(acc?.nextRetryAfter).toBe(futureCoolingTime);
+    expect(acc?.nextRecoverAt).toBe(futureCoolingTime);
+    expect(acc?.windows[0].resetsAt).toBe(futureCoolingTime);
+    expect(result.quota.windows[0].resetsAt).toBe(futureCoolingTime);
+  });
+
+  it("does not heuristically guess plan or email from auth_id", () => {
+    const cpaDir = join(tempDir, "cpa-no-heuristics");
+    mkdirSync(cpaDir, { recursive: true });
+
+    writeFileSync(
+      join(cpaDir, "codex-heuristics.cds"),
+      JSON.stringify({
+        auth_id: "john.doe@example.com-pro.json",
+        provider: "codex",
+        status: "active",
+      }),
+      "utf8",
+    );
+
+    const result = readCodexPool({ cpaDir });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    const acc = result.quota.pool?.accounts[0];
+    expect(acc?.accountKey).toBe("john.doe@example.com-pro.json");
+    expect(acc?.email).toBeUndefined();
+    expect(acc?.plan).toBeUndefined();
+    expect(result.quota.plan).toBeUndefined();
+    expect(result.quota.account?.email).toBeUndefined();
+    expect(result.quota.account?.accountId).toBe(
+      "john.doe@example.com-pro.json",
+    );
+    expect(result.quota.pool?.activeAccount).toBe(
+      "john.doe@example.com-pro.json",
+    );
+  });
+
+  it("ignores .cds files with no provider property and no records, falling back to registry", () => {
+    const cpaDir = join(tempDir, "cpa-no-provider");
+    mkdirSync(cpaDir, { recursive: true });
+
+    writeFileSync(
+      join(cpaDir, "unknown-empty.cds"),
+      JSON.stringify({
+        auth_id: "unknown-account.json",
+        status: "active",
+      }),
+      "utf8",
+    );
+
+    const fallbackRegistry = join(tempDir, "empty-provider-fallback.json");
+    writeFileSync(
+      fallbackRegistry,
+      JSON.stringify({
+        accounts: [
+          {
+            account_key: "registry-acc",
+            email: "reg@example.com",
+            last_used_at: 1_700_000_000,
+            last_usage: { primary: { used_percent: 10 } },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = readCodexPool({
+      cpaDir,
+      registryPath: fallbackRegistry,
+      nowMs: 1_700_000_000 * 1000,
+    });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+    expect(result.source).toBe("registry");
   });
 });

@@ -29,8 +29,7 @@ export function resolveCodexRegistryPath(
 export function resolveCpaStateDir(
   environment: NodeJS.ProcessEnv = process.env,
 ): string {
-  const explicit =
-    environment.CPA_DIR?.trim() || environment.CLI_PROXY_API_DIR?.trim();
+  const explicit = environment.CPA_DIR?.trim();
   if (explicit) return explicit;
   return join(homedir(), ".cli-proxy-api");
 }
@@ -112,7 +111,6 @@ export function readCodexPool(
         nextRetryAfter?: string;
         nextRecoverAt?: string;
         recoveryTime?: string;
-        lastError?: unknown;
         updatedAt?: string;
         malformed?: boolean;
         error?: string;
@@ -150,25 +148,18 @@ export function readCodexPool(
         }
 
         const cds = raw as Record<string, unknown>;
-        const provider =
-          typeof cds.provider === "string" ? cds.provider : undefined;
         const records = Array.isArray(cds.records)
           ? (cds.records as Array<Record<string, unknown>>)
           : [];
 
-        if (provider && provider !== "codex") {
+        const isCodex =
+          cds.provider === "codex" ||
+          records.some(
+            (r) =>
+              r && typeof r === "object" && r.provider === "codex",
+          );
+        if (!isCodex) {
           continue;
-        }
-        if (!provider && records.length > 0) {
-          const hasCodexRecord = records.some((r) => r.provider === "codex");
-          if (
-            !hasCodexRecord &&
-            records.some(
-              (r) => typeof r.provider === "string" && r.provider !== "codex",
-            )
-          ) {
-            continue;
-          }
         }
 
         hasCodexFiles = true;
@@ -179,18 +170,9 @@ export function readCodexPool(
             : file.replace(/\.cds$/, "");
         const accountKey = authId;
         const email =
-          typeof cds.email === "string"
-            ? cds.email
-            : authId.match(
-                /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/,
-              )?.[1];
-
-        let plan = typeof cds.plan === "string" ? cds.plan : undefined;
-        if (!plan) {
-          if (authId.includes("-team")) plan = "team";
-          else if (authId.includes("-plus")) plan = "plus";
-          else if (authId.includes("-pro")) plan = "pro";
-        }
+          typeof cds.email === "string" ? cds.email : undefined;
+        const plan =
+          typeof cds.plan === "string" ? cds.plan : undefined;
 
         const topStatus =
           typeof cds.status === "string" ? cds.status : undefined;
@@ -198,22 +180,26 @@ export function readCodexPool(
           cds.quota && typeof cds.quota === "object"
             ? (cds.quota as Record<string, unknown>).exceeded === true
             : false;
+        const topIsCooling = topStatus === "cooling" || topQuotaExceeded;
 
-        let isCooling = topStatus === "cooling" || topQuotaExceeded;
+        let rootRetryAfter: string | undefined;
+        let rootRecoverAt: string | undefined;
+        if (topIsCooling) {
+          rootRetryAfter = parseEpochOrIso(cds.next_retry_after);
+          if (cds.quota && typeof cds.quota === "object") {
+            rootRecoverAt = parseEpochOrIso(
+              (cds.quota as Record<string, unknown>).next_recover_at,
+            );
+          }
+        }
+
+        let isCooling = topIsCooling;
         const candidateRecoveryTimes: string[] = [];
+        if (rootRetryAfter) candidateRecoveryTimes.push(rootRetryAfter);
+        if (rootRecoverAt) candidateRecoveryTimes.push(rootRecoverAt);
 
-        const topNextRetryAfter = parseEpochOrIso(cds.next_retry_after);
-        if (topNextRetryAfter) candidateRecoveryTimes.push(topNextRetryAfter);
-
-        const topQuotaRecoverAt =
-          cds.quota && typeof cds.quota === "object"
-            ? parseEpochOrIso(
-                (cds.quota as Record<string, unknown>).next_recover_at,
-              )
-            : undefined;
-        if (topQuotaRecoverAt) candidateRecoveryTimes.push(topQuotaRecoverAt);
-
-        let lastError = cds.last_error;
+        let recordRetryAfter: string | undefined;
+        let recordRecoverAt: string | undefined;
 
         for (const rec of records) {
           if (!rec || typeof rec !== "object") continue;
@@ -223,31 +209,23 @@ export function readCodexPool(
             rec.quota && typeof rec.quota === "object"
               ? (rec.quota as Record<string, unknown>).exceeded === true
               : false;
-          if (recStatus === "cooling" || recExceeded) {
+          const recIsCooling = recStatus === "cooling" || recExceeded;
+          if (recIsCooling) {
             isCooling = true;
-            if (!lastError && rec.last_error) lastError = rec.last_error;
             const recNextRetryAfter = parseEpochOrIso(rec.next_retry_after);
-            if (recNextRetryAfter)
+            if (recNextRetryAfter) {
               candidateRecoveryTimes.push(recNextRetryAfter);
+              if (!recordRetryAfter) recordRetryAfter = recNextRetryAfter;
+            }
             if (rec.quota && typeof rec.quota === "object") {
-              const recRecoverAt = parseEpochOrIso(
+              const recQuotaRecoverAt = parseEpochOrIso(
                 (rec.quota as Record<string, unknown>).next_recover_at,
               );
-              if (recRecoverAt) candidateRecoveryTimes.push(recRecoverAt);
+              if (recQuotaRecoverAt) {
+                candidateRecoveryTimes.push(recQuotaRecoverAt);
+                if (!recordRecoverAt) recordRecoverAt = recQuotaRecoverAt;
+              }
             }
-          }
-        }
-
-        let nextRetryAfter = topNextRetryAfter;
-        let nextRecoverAt = topQuotaRecoverAt;
-        for (const rec of records) {
-          if (!nextRetryAfter && rec.next_retry_after) {
-            nextRetryAfter = parseEpochOrIso(rec.next_retry_after);
-          }
-          if (!nextRecoverAt && rec.quota && typeof rec.quota === "object") {
-            nextRecoverAt = parseEpochOrIso(
-              (rec.quota as Record<string, unknown>).next_recover_at,
-            );
           }
         }
 
@@ -256,9 +234,16 @@ export function readCodexPool(
           .filter((ms) => Number.isFinite(ms));
 
         const recoveryTime =
-          validTimes.length > 0
+          isCooling && validTimes.length > 0
             ? new Date(Math.min(...validTimes)).toISOString()
             : undefined;
+
+        const nextRetryAfter = isCooling
+          ? (rootRetryAfter ?? recordRetryAfter ?? recoveryTime)
+          : undefined;
+        const nextRecoverAt = isCooling
+          ? (rootRecoverAt ?? recordRecoverAt ?? recoveryTime)
+          : undefined;
 
         const updatedAt =
           typeof cds.updated_at === "string" ? cds.updated_at : undefined;
@@ -267,12 +252,11 @@ export function readCodexPool(
           authId,
           accountKey,
           email,
-          plan: plan ?? "team",
+          plan,
           cooling: isCooling,
-          nextRetryAfter: nextRetryAfter ?? recoveryTime,
-          nextRecoverAt: nextRecoverAt ?? recoveryTime,
+          nextRetryAfter,
+          nextRecoverAt,
           recoveryTime,
-          lastError,
           updatedAt,
         });
       }
@@ -294,6 +278,7 @@ export function readCodexPool(
         const validAccounts = parsedCpaAccounts.filter((a) => !a.malformed);
         const allCooling =
           validAccounts.length > 0 && validAccounts.every((a) => a.cooling);
+        const anyCooling = validAccounts.some((a) => a.cooling);
 
         const coolingTimes = validAccounts
           .map((a) =>
@@ -317,7 +302,9 @@ export function readCodexPool(
             kind: "session",
             ...(earliestRecovery
               ? { resetsAt: earliestRecovery }
-              : { resetText: "pool serving" }),
+              : anyCooling
+                ? { resetText: "cooling" }
+                : { resetText: "pool serving" }),
           },
         ];
 
@@ -355,12 +342,14 @@ export function readCodexPool(
             };
           }
           const accWindows: QuotaWindow[] = [];
-          if (a.cooling && a.recoveryTime) {
+          if (a.cooling) {
             accWindows.push({
               id: "pool",
               label: "pool",
               kind: "session",
-              resetsAt: a.recoveryTime,
+              ...(a.recoveryTime
+                ? { resetsAt: a.recoveryTime }
+                : { resetText: "cooling" }),
             });
           } else {
             accWindows.push({
@@ -373,7 +362,7 @@ export function readCodexPool(
           return {
             email: a.email,
             accountKey: a.accountKey,
-            plan: a.plan ?? "team",
+            plan: a.plan,
             status: a.cooling ? "cooling" : "active",
             nextRetryAfter: a.nextRetryAfter,
             nextRecoverAt: a.nextRecoverAt,
@@ -397,7 +386,7 @@ export function readCodexPool(
           provider: "codex",
           label: "Codex",
           source: "cli-rpc",
-          plan: activeAccount?.plan ?? "team",
+          plan: activeAccount?.plan,
           account: {
             email: activeAccount?.email,
             accountId: activeAccount?.accountKey,
