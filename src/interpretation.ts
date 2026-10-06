@@ -941,7 +941,7 @@ function availability(
 
 function isCodexAccountWindow(window: QuotaWindow): boolean {
   return (
-    /^(?:five_hour|weekly)(?:_\d+)?$/.test(window.id) ||
+    /^(?:five_hour|weekly|pool)(?:_\d+)?$/.test(window.id) ||
     window.id.startsWith("window:")
   );
 }

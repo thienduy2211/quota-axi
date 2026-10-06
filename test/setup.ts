@@ -61,6 +61,13 @@ process.env.CODEX_REGISTRY_PATH = join(
   `quota-axi-test-no-codex-registry-${process.pid}-${randomUUID()}.json`,
 );
 
+// Codex CPA pool .cds directory must never come from the developer's real
+// ~/.cli-proxy-api during tests.
+process.env.CPA_DIR = join(
+  tmpdir(),
+  `quota-axi-test-no-cpa-dir-${process.pid}-${randomUUID()}`,
+);
+
 // Antigravity agy-multi pool state must never come from the developer's real
 // environment during tests.
 process.env.AGY_MULTI_STATE_PATH = join(

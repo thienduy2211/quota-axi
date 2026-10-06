@@ -1019,8 +1019,8 @@ async function inspectAuthWithDependencies(
   const pool = readCodexPool();
   if (pool.kind !== "missing") {
     sources.push({
-      source: "pool-registry",
-      path: resolveCodexRegistryPath(),
+      source: pool.source === "cpa" ? "cpa" : "pool-registry",
+      path: pool.path ?? resolveCodexRegistryPath(),
       status: pool.kind === "success" ? "available" : "invalid",
       error: pool.kind === "malformed" ? pool.error : undefined,
     });
