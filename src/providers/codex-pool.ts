@@ -1,8 +1,15 @@
+import { readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { readJsonFileResult } from "../lib/fs.js";
 import { clampPercent, nowIso, parseEpochOrIso } from "../lib/time.js";
-import type { ProviderQuota, QuotaWindow, SourceAttempt } from "../types.js";
+import type {
+  PoolAccountDetail,
+  ProviderQuota,
+  ProviderStatus,
+  QuotaWindow,
+  SourceAttempt,
+} from "../types.js";
 import { failedProvider, sourceNames } from "./common.js";
 
 const FIVE_HOURS_SECONDS = 18_000;
@@ -19,10 +26,30 @@ export function resolveCodexRegistryPath(
   return join(homedir(), ".codex", "accounts", "registry.json");
 }
 
+export function resolveCpaStateDir(
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const explicit =
+    environment.CPA_DIR?.trim() || environment.CLI_PROXY_API_DIR?.trim();
+  if (explicit) return explicit;
+  return join(homedir(), ".cli-proxy-api");
+}
+
 export type CodexPoolResult =
   | { kind: "missing" }
-  | { kind: "malformed"; error: string; failure: ProviderQuota }
-  | { kind: "success"; quota: ProviderQuota };
+  | {
+      kind: "malformed";
+      error: string;
+      failure: ProviderQuota;
+      source?: "cpa" | "registry";
+      path?: string;
+    }
+  | {
+      kind: "success";
+      quota: ProviderQuota;
+      source?: "cpa" | "registry";
+      path?: string;
+    };
 
 type RawCodexAccount = {
   account_key?: unknown;
@@ -54,11 +81,360 @@ type RawCodexAccount = {
 export function readCodexPool(
   options: {
     registryPath?: string;
+    cpaDir?: string;
     environment?: NodeJS.ProcessEnv;
     nowMs?: number;
   } = {},
 ): CodexPoolResult {
   const environment = options.environment ?? process.env;
+  const nowMs = options.nowMs ?? Date.now();
+
+  const testRegistryExplicit =
+    options.registryPath !== undefined && options.cpaDir === undefined;
+
+  if (!testRegistryExplicit) {
+    const cpaDir = options.cpaDir ?? resolveCpaStateDir(environment);
+    let entries: string[];
+    try {
+      entries = readdirSync(cpaDir);
+    } catch {
+      entries = [];
+    }
+
+    const cdsFiles = entries.filter((e) => e.endsWith(".cds")).sort();
+    if (cdsFiles.length > 0) {
+      type ParsedCpaAccount = {
+        authId: string;
+        accountKey: string;
+        email?: string;
+        plan?: string;
+        cooling: boolean;
+        nextRetryAfter?: string;
+        nextRecoverAt?: string;
+        recoveryTime?: string;
+        lastError?: unknown;
+        updatedAt?: string;
+        malformed?: boolean;
+        error?: string;
+      };
+
+      const parsedCpaAccounts: ParsedCpaAccount[] = [];
+      let hasCodexFiles = false;
+
+      for (const file of cdsFiles) {
+        const filePath = join(cpaDir, file);
+        const result = readJsonFileResult(filePath);
+        if (result.status === "invalid") {
+          hasCodexFiles = true;
+          parsedCpaAccounts.push({
+            authId: file.replace(/\.cds$/, ""),
+            accountKey: file.replace(/\.cds$/, ""),
+            cooling: false,
+            malformed: true,
+            error: result.error,
+          });
+          continue;
+        }
+        if (result.status !== "success") continue;
+        const raw = result.value;
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+          hasCodexFiles = true;
+          parsedCpaAccounts.push({
+            authId: file.replace(/\.cds$/, ""),
+            accountKey: file.replace(/\.cds$/, ""),
+            cooling: false,
+            malformed: true,
+            error: "invalid_cds_shape",
+          });
+          continue;
+        }
+
+        const cds = raw as Record<string, unknown>;
+        const provider =
+          typeof cds.provider === "string" ? cds.provider : undefined;
+        const records = Array.isArray(cds.records)
+          ? (cds.records as Array<Record<string, unknown>>)
+          : [];
+
+        if (provider && provider !== "codex") {
+          continue;
+        }
+        if (!provider && records.length > 0) {
+          const hasCodexRecord = records.some((r) => r.provider === "codex");
+          if (
+            !hasCodexRecord &&
+            records.some(
+              (r) => typeof r.provider === "string" && r.provider !== "codex",
+            )
+          ) {
+            continue;
+          }
+        }
+
+        hasCodexFiles = true;
+
+        const authId =
+          typeof cds.auth_id === "string" && cds.auth_id.trim() !== ""
+            ? cds.auth_id
+            : file.replace(/\.cds$/, "");
+        const accountKey = authId;
+        const email =
+          typeof cds.email === "string"
+            ? cds.email
+            : authId.match(
+                /([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/,
+              )?.[1];
+
+        let plan = typeof cds.plan === "string" ? cds.plan : undefined;
+        if (!plan) {
+          if (authId.includes("-team")) plan = "team";
+          else if (authId.includes("-plus")) plan = "plus";
+          else if (authId.includes("-pro")) plan = "pro";
+        }
+
+        const topStatus =
+          typeof cds.status === "string" ? cds.status : undefined;
+        const topQuotaExceeded =
+          cds.quota && typeof cds.quota === "object"
+            ? (cds.quota as Record<string, unknown>).exceeded === true
+            : false;
+
+        let isCooling = topStatus === "cooling" || topQuotaExceeded;
+        const candidateRecoveryTimes: string[] = [];
+
+        const topNextRetryAfter = parseEpochOrIso(cds.next_retry_after);
+        if (topNextRetryAfter) candidateRecoveryTimes.push(topNextRetryAfter);
+
+        const topQuotaRecoverAt =
+          cds.quota && typeof cds.quota === "object"
+            ? parseEpochOrIso(
+                (cds.quota as Record<string, unknown>).next_recover_at,
+              )
+            : undefined;
+        if (topQuotaRecoverAt) candidateRecoveryTimes.push(topQuotaRecoverAt);
+
+        let lastError = cds.last_error;
+
+        for (const rec of records) {
+          if (!rec || typeof rec !== "object") continue;
+          const recStatus =
+            typeof rec.status === "string" ? rec.status : undefined;
+          const recExceeded =
+            rec.quota && typeof rec.quota === "object"
+              ? (rec.quota as Record<string, unknown>).exceeded === true
+              : false;
+          if (recStatus === "cooling" || recExceeded) {
+            isCooling = true;
+            if (!lastError && rec.last_error) lastError = rec.last_error;
+            const recNextRetryAfter = parseEpochOrIso(rec.next_retry_after);
+            if (recNextRetryAfter)
+              candidateRecoveryTimes.push(recNextRetryAfter);
+            if (rec.quota && typeof rec.quota === "object") {
+              const recRecoverAt = parseEpochOrIso(
+                (rec.quota as Record<string, unknown>).next_recover_at,
+              );
+              if (recRecoverAt) candidateRecoveryTimes.push(recRecoverAt);
+            }
+          }
+        }
+
+        let nextRetryAfter = topNextRetryAfter;
+        let nextRecoverAt = topQuotaRecoverAt;
+        for (const rec of records) {
+          if (!nextRetryAfter && rec.next_retry_after) {
+            nextRetryAfter = parseEpochOrIso(rec.next_retry_after);
+          }
+          if (!nextRecoverAt && rec.quota && typeof rec.quota === "object") {
+            nextRecoverAt = parseEpochOrIso(
+              (rec.quota as Record<string, unknown>).next_recover_at,
+            );
+          }
+        }
+
+        const validTimes = candidateRecoveryTimes
+          .map((t) => Date.parse(t))
+          .filter((ms) => Number.isFinite(ms));
+
+        const recoveryTime =
+          validTimes.length > 0
+            ? new Date(Math.min(...validTimes)).toISOString()
+            : undefined;
+
+        const updatedAt =
+          typeof cds.updated_at === "string" ? cds.updated_at : undefined;
+
+        parsedCpaAccounts.push({
+          authId,
+          accountKey,
+          email,
+          plan: plan ?? "team",
+          cooling: isCooling,
+          nextRetryAfter: nextRetryAfter ?? recoveryTime,
+          nextRecoverAt: nextRecoverAt ?? recoveryTime,
+          recoveryTime,
+          lastError,
+          updatedAt,
+        });
+      }
+
+      if (hasCodexFiles) {
+        if (
+          parsedCpaAccounts.length === 0 ||
+          parsedCpaAccounts.every((a) => a.malformed)
+        ) {
+          return {
+            kind: "malformed",
+            error: "malformed_cds",
+            failure: poolMalformedFailure("malformed_cds", "unavailable"),
+            source: "cpa",
+            path: cpaDir,
+          };
+        }
+
+        const validAccounts = parsedCpaAccounts.filter((a) => !a.malformed);
+        const allCooling =
+          validAccounts.length > 0 && validAccounts.every((a) => a.cooling);
+
+        const coolingTimes = validAccounts
+          .map((a) =>
+            a.cooling && a.recoveryTime
+              ? Date.parse(a.recoveryTime)
+              : undefined,
+          )
+          .filter(
+            (ms): ms is number => typeof ms === "number" && Number.isFinite(ms),
+          );
+
+        const earliestRecovery =
+          coolingTimes.length > 0
+            ? new Date(Math.min(...coolingTimes)).toISOString()
+            : undefined;
+
+        const headlineWindows: QuotaWindow[] = [
+          {
+            id: "pool",
+            label: "pool",
+            kind: "session",
+            ...(earliestRecovery
+              ? { resetsAt: earliestRecovery }
+              : { resetText: "pool serving" }),
+          },
+        ];
+
+        const activeAccount =
+          validAccounts.find((a) => !a.cooling) ?? validAccounts[0];
+
+        const attempts: SourceAttempt[] = parsedCpaAccounts.map((a) => {
+          if (a.malformed) {
+            return {
+              source: `pool:${a.accountKey}`,
+              status: "failed",
+              error: a.error ?? "malformed_cds",
+            };
+          }
+          if (a.cooling) {
+            return {
+              source: `pool:${a.accountKey}`,
+              status: "skipped",
+              error: "cooling",
+            };
+          }
+          return {
+            source: `pool:${a.accountKey}`,
+            status: "success",
+          };
+        });
+
+        const poolAccounts: PoolAccountDetail[] = parsedCpaAccounts.map((a) => {
+          if (a.malformed) {
+            return {
+              email: a.email,
+              accountKey: a.accountKey,
+              status: "unavailable",
+              windows: [],
+            };
+          }
+          const accWindows: QuotaWindow[] = [];
+          if (a.cooling && a.recoveryTime) {
+            accWindows.push({
+              id: "pool",
+              label: "pool",
+              kind: "session",
+              resetsAt: a.recoveryTime,
+            });
+          } else {
+            accWindows.push({
+              id: "pool",
+              label: "pool",
+              kind: "session",
+              resetText: "pool serving",
+            });
+          }
+          return {
+            email: a.email,
+            accountKey: a.accountKey,
+            plan: a.plan ?? "team",
+            status: a.cooling ? "cooling" : "active",
+            nextRetryAfter: a.nextRetryAfter,
+            nextRecoverAt: a.nextRecoverAt,
+            windows: accWindows,
+          };
+        });
+
+        const updatedTimes = validAccounts
+          .map((a) => (a.updatedAt ? Date.parse(a.updatedAt) : undefined))
+          .filter(
+            (ms): ms is number => typeof ms === "number" && Number.isFinite(ms),
+          );
+        const maxUpdatedMs =
+          updatedTimes.length > 0 ? Math.max(...updatedTimes) : undefined;
+        const refreshedAt =
+          maxUpdatedMs !== undefined
+            ? new Date(maxUpdatedMs).toISOString()
+            : nowIso();
+
+        const quota: ProviderQuota = {
+          provider: "codex",
+          label: "Codex",
+          source: "cli-rpc",
+          plan: activeAccount?.plan ?? "team",
+          account: {
+            email: activeAccount?.email,
+            accountId: activeAccount?.accountKey,
+            identityStatus: "verified",
+          },
+          windows: headlineWindows,
+          accountKey: "codex-home",
+          accountKeys: [
+            "codex-home",
+            "default",
+            ...parsedCpaAccounts.map((a) => a.accountKey),
+          ],
+          attempts,
+          pool: {
+            source: "cpa",
+            activeAccount: activeAccount?.email ?? activeAccount?.accountKey,
+            accounts: poolAccounts,
+          },
+          state: {
+            status: allCooling ? "unavailable" : "fresh",
+            stale: false,
+            refreshedAt,
+            sourcesTried: sourceNames(attempts),
+          },
+        };
+
+        return {
+          kind: "success",
+          quota,
+          source: "cpa",
+          path: cpaDir,
+        };
+      }
+    }
+  }
+
+  // Existing Registry Fallback
   const path = options.registryPath ?? resolveCodexRegistryPath(environment);
   const result = readJsonFileResult(path);
   if (result.status === "missing") return { kind: "missing" };
@@ -67,6 +443,8 @@ export function readCodexPool(
       kind: "malformed",
       error: result.error,
       failure: poolMalformedFailure(result.error),
+      source: "registry",
+      path,
     };
   }
 
@@ -76,6 +454,8 @@ export function readCodexPool(
       kind: "malformed",
       error: "invalid_registry_shape",
       failure: poolMalformedFailure("invalid_registry_shape"),
+      source: "registry",
+      path,
     };
   }
 
@@ -88,10 +468,11 @@ export function readCodexPool(
       kind: "malformed",
       error: "no_accounts_in_registry",
       failure: poolMalformedFailure("no_accounts_in_registry"),
+      source: "registry",
+      path,
     };
   }
 
-  const nowMs = options.nowMs ?? Date.now();
   const nowS = Math.floor(nowMs / 1000);
 
   const activeAccountKey =
@@ -169,6 +550,8 @@ export function readCodexPool(
       kind: "malformed",
       error: "no_valid_accounts",
       failure: poolMalformedFailure("no_valid_accounts"),
+      source: "registry",
+      path,
     };
   }
 
@@ -238,6 +621,8 @@ export function readCodexPool(
       kind: "malformed",
       error: "missing_quota_usage",
       failure: poolMalformedFailure("missing_quota_usage"),
+      source: "registry",
+      path,
     };
   }
 
@@ -339,16 +724,24 @@ export function readCodexPool(
     },
   };
 
-  return { kind: "success", quota };
+  return {
+    kind: "success",
+    quota,
+    source: "registry",
+    path,
+  };
 }
 
-function poolMalformedFailure(error: string): ProviderQuota {
+function poolMalformedFailure(
+  error: string,
+  status: ProviderStatus = "error",
+): ProviderQuota {
   return {
     ...failedProvider({
       provider: "codex",
       label: "Codex",
-      status: "error",
-      error: `Codex pool registry malformed: ${error}`,
+      status,
+      error: `Codex pool malformed: ${error}`,
       sourcesTried: ["pool"],
       attempts: [{ source: "pool", status: "failed", error }],
     }),

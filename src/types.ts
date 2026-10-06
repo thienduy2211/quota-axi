@@ -374,7 +374,9 @@ export type PoolAccountDetail = {
   email?: string;
   accountKey?: string;
   plan?: string;
-  status: "available" | "unavailable";
+  status: "available" | "unavailable" | "cooling" | "active";
+  nextRetryAfter?: string;
+  nextRecoverAt?: string;
   cooldowns?: Record<string, number>;
   fetchedAt?: string;
   windows: QuotaWindow[];
