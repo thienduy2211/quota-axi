@@ -155,8 +155,7 @@ export function readCodexPool(
         const isCodex =
           cds.provider === "codex" ||
           records.some(
-            (r) =>
-              r && typeof r === "object" && r.provider === "codex",
+            (r) => r && typeof r === "object" && r.provider === "codex",
           );
         if (!isCodex) {
           continue;
@@ -169,10 +168,8 @@ export function readCodexPool(
             ? cds.auth_id
             : file.replace(/\.cds$/, "");
         const accountKey = authId;
-        const email =
-          typeof cds.email === "string" ? cds.email : undefined;
-        const plan =
-          typeof cds.plan === "string" ? cds.plan : undefined;
+        const email = typeof cds.email === "string" ? cds.email : undefined;
+        const plan = typeof cds.plan === "string" ? cds.plan : undefined;
 
         const topStatus =
           typeof cds.status === "string" ? cds.status : undefined;
