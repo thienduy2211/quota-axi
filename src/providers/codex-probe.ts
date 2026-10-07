@@ -97,6 +97,11 @@ export function sendRpc(
   child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
 }
 
+/**
+ * Extracts only access token, account id, and id token from a Codex auth file.
+ * Deliberately ignores refresh tokens: ephemeral probes must never trigger token
+ * rotation that would be lost on directory cleanup.
+ */
 export function extractCodexTokensFromFile(
   filePath: string,
 ): CodexAuthTokens | undefined {
@@ -193,6 +198,9 @@ export async function probeCodexAppServer(options: {
   try {
     tempDir = mkdtempSync(join(tmpdir(), "quota-axi-codex-probe-"));
     const authJsonPath = join(tempDir, "auth.json");
+    // Write access token only: never pass refresh token, as rotation inside the
+    // ephemeral directory would be discarded upon cleanup, permanently invalidating
+    // the stored credential.
     const authPayload = {
       auth_mode: "chatgpt",
       tokens: {

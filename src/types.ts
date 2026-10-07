@@ -355,7 +355,9 @@ export type ProviderQuota = {
      * (kept in default `--json` when this is set) says when it was taken.
      */
     reused?: true;
+    /** Sparse marker: pool cooldowns could not be verified against the vendor via live probe. */
     cooldownUnverified?: boolean;
+    /** Sparse marker: provider or pool status has unverified cooldown or availability. */
     unverified?: boolean;
   };
   attempts?: SourceAttempt[];
@@ -383,8 +385,11 @@ export type PoolAccountDetail = {
   fetchedAt?: string;
   windows: QuotaWindow[];
   stale?: boolean;
+  /** True when a cooling pool account was verified active by a live vendor probe. */
   recovered?: boolean;
+  /** True when pool account cooldown status could not be verified by a live vendor probe. */
   unverified?: boolean;
+  /** True when pool account cooldown status is retained unverified. */
   cooldownUnverified?: boolean;
   note?: string;
 };
