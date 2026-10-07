@@ -1551,17 +1551,19 @@ describe("Codex CPA pool aggregation", () => {
     mkdirSync(cpaDir, { recursive: true });
 
     const nowMs = 1_770_000_000_000;
-    const futureCooling = new Date(nowMs + 86400 * 1000).toISOString();
+    const sessionReset = new Date(nowMs + 3600 * 1000).toISOString();
+    const weeklyReset = new Date(nowMs + 86400 * 1000).toISOString();
 
     writeFileSync(
       join(cpaDir, "codex-cooling-exhausted.cds"),
       JSON.stringify({
         auth_id: "codex-cooling-exhausted.json",
         provider: "codex",
+        updated_at: "2026-10-01T00:00:00Z",
         records: [
           {
             status: "cooling",
-            next_retry_after: futureCooling,
+            next_retry_after: sessionReset,
           },
         ],
       }),
@@ -1582,14 +1584,15 @@ describe("Codex CPA pool aggregation", () => {
             kind: "session",
             percentUsed: 100,
             percentRemaining: 0,
-            resetsAt: futureCooling,
+            resetsAt: sessionReset,
           },
           {
             id: "weekly",
             label: "week",
             kind: "weekly",
-            percentUsed: 20,
-            percentRemaining: 80,
+            percentUsed: 100,
+            percentRemaining: 0,
+            resetsAt: weeklyReset,
           },
         ],
       }),
@@ -1600,6 +1603,8 @@ describe("Codex CPA pool aggregation", () => {
 
     expect(result.quota.state.status).toBe("unavailable");
     expect(result.quota.state.stale).toBe(false);
+    expect(result.quota.state.retryAfter).toBe(weeklyReset);
+    expect(result.quota.state.refreshedAt).not.toBe("2026-10-01T00:00:00Z");
     expect(result.quota.state.cooldownUnverified).toBeUndefined();
     expect(result.quota.state.unverified).toBeUndefined();
 
@@ -1611,6 +1616,8 @@ describe("Codex CPA pool aggregation", () => {
     expect(acc.unverified).toBeUndefined();
     expect(acc.cooldownUnverified).toBeUndefined();
     expect(acc.note).toBeUndefined();
+    expect(acc.nextRetryAfter).toBe(weeklyReset);
+    expect(acc.nextRecoverAt).toBe(weeklyReset);
     expect(
       acc.windows.find((w) => w.id === "five_hour")?.percentRemaining,
     ).toBe(0);
@@ -1622,6 +1629,56 @@ describe("Codex CPA pool aggregation", () => {
       (a) => a.source === "cli-rpc:codex-cooling-exhausted.json",
     );
     expect(rpcAttempt?.status).toBe("success");
+  });
+
+  it("fixture .cds with future cooling + probe throws error -> cooldown preserved as unverified without crashing", async () => {
+    const cpaDir = join(tempDir, "cpa-probe-throws");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const nowMs = 1_770_000_000_000;
+    const futureCooling = new Date(nowMs + 86400 * 1000).toISOString();
+
+    writeFileSync(
+      join(cpaDir, "codex-cooling-throws.cds"),
+      JSON.stringify({
+        auth_id: "codex-cooling-throws.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            next_retry_after: futureCooling,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({
+      cpaDir,
+      nowMs,
+      probe: async () => {
+        throw new Error("unexpected spawn failure");
+      },
+    });
+
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.cooldownUnverified).toBe(true);
+    expect(result.quota.state.unverified).toBe(true);
+
+    const acc = result.quota.pool?.accounts[0];
+    expect(acc?.status).toBe("cooling");
+    expect(acc?.unverified).toBe(true);
+    expect(acc?.cooldownUnverified).toBe(true);
+    expect(acc?.note).toBe("cooldown unverified");
+
+    const rpcAttempt = result.quota.attempts?.find(
+      (a) => a.source === "cli-rpc:codex-cooling-throws.json",
+    );
+    expect(rpcAttempt?.status).toBe("failed");
+    expect(rpcAttempt?.error).toBe("unexpected spawn failure");
   });
 
   it("fixture .cds with future cooling + probe cannot run -> cooling verdict stands with unverified note", async () => {

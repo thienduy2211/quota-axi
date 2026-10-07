@@ -191,6 +191,7 @@ type ParsedCpaAccount = {
   note?: string;
   probeError?: string;
   windows?: QuotaWindow[];
+  probed?: boolean;
 };
 
 function parseCpaFiles(
@@ -493,10 +494,11 @@ function buildCpaPoolResult(
     );
   const maxUpdatedMs =
     updatedTimes.length > 0 ? Math.max(...updatedTimes) : undefined;
+  const anyProbed = validAccounts.some((a) => a.probed);
   const refreshedAt =
-    maxUpdatedMs !== undefined
-      ? new Date(maxUpdatedMs).toISOString()
-      : nowIso();
+    anyProbed || maxUpdatedMs === undefined
+      ? nowIso()
+      : new Date(maxUpdatedMs).toISOString();
 
   const quota: ProviderQuota = {
     provider: "codex",
@@ -593,10 +595,10 @@ function applyProbeSuccess(
         (ms): ms is number => typeof ms === "number" && Number.isFinite(ms),
       );
     if (resetTimes.length > 0) {
-      const earliest = new Date(Math.min(...resetTimes)).toISOString();
-      a.recoveryTime = earliest;
-      a.nextRetryAfter = earliest;
-      a.nextRecoverAt = earliest;
+      const recoveryTimestamp = new Date(Math.max(...resetTimes)).toISOString();
+      a.recoveryTime = recoveryTimestamp;
+      a.nextRetryAfter = recoveryTimestamp;
+      a.nextRecoverAt = recoveryTimestamp;
     }
   }
   a.windows = windows;
@@ -645,6 +647,7 @@ export async function readCodexPool(
 
       if (coolingAccounts.length > 0 && !options.skipProbe) {
         for (const a of coolingAccounts) {
+          a.probed = true;
           if (options.probe) {
             try {
               const res = await options.probe({
@@ -667,18 +670,25 @@ export async function readCodexPool(
               );
             }
           } else {
-            const res = await probeCodexCredential({
-              cpaDir,
-              authId: a.authId,
-              accountKey: a.accountKey,
-              environment,
-            });
-            if (res.status === "success") {
-              applyProbeSuccess(a, res);
-            } else if (res.status === "failed") {
-              applyProbeFailure(a, res.error);
-            } else {
-              applyProbeFailure(a);
+            try {
+              const res = await probeCodexCredential({
+                cpaDir,
+                authId: a.authId,
+                accountKey: a.accountKey,
+                environment,
+              });
+              if (res.status === "success") {
+                applyProbeSuccess(a, res);
+              } else if (res.status === "failed") {
+                applyProbeFailure(a, res.error);
+              } else {
+                applyProbeFailure(a);
+              }
+            } catch (err) {
+              applyProbeFailure(
+                a,
+                err instanceof Error ? err.message : String(err),
+              );
             }
           }
         }

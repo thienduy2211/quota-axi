@@ -188,11 +188,11 @@ export async function probeCodexAppServer(options: {
   environment?: NodeJS.ProcessEnv;
 }): Promise<CodexProbeResult> {
   const { binaryPath, tokens, environment = process.env } = options;
-  const tempDir = mkdtempSync(join(tmpdir(), "quota-axi-codex-probe-"));
-  const authJsonPath = join(tempDir, "auth.json");
-
+  let tempDir: string | undefined;
   let child: ReturnType<typeof spawn> | undefined;
   try {
+    tempDir = mkdtempSync(join(tmpdir(), "quota-axi-codex-probe-"));
+    const authJsonPath = join(tempDir, "auth.json");
     const authPayload = {
       auth_mode: "chatgpt",
       tokens: {
@@ -330,10 +330,12 @@ export async function probeCodexAppServer(options: {
     if (child) {
       terminateChild(child);
     }
-    try {
-      rmSync(tempDir, { recursive: true, force: true });
-    } catch {
-      // Best-effort temp dir cleanup
+    if (tempDir) {
+      try {
+        rmSync(tempDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort temp dir cleanup
+      }
     }
   }
 }
@@ -354,38 +356,45 @@ export async function probeCodexCredential(options: {
   accountKey: string;
   environment?: NodeJS.ProcessEnv;
 }): Promise<ProbeCredentialOutcome> {
-  const authPath = findCodexCredentialFile(options);
-  if (!authPath) {
-    return { status: "unverified", reason: "no_auth_material" };
-  }
+  try {
+    const authPath = findCodexCredentialFile(options);
+    if (!authPath) {
+      return { status: "unverified", reason: "no_auth_material" };
+    }
 
-  const tokens = extractCodexTokensFromFile(authPath);
-  if (!tokens || !tokens.accessToken) {
-    return { status: "unverified", reason: "no_auth_material" };
-  }
+    const tokens = extractCodexTokensFromFile(authPath);
+    if (!tokens || !tokens.accessToken) {
+      return { status: "unverified", reason: "no_auth_material" };
+    }
 
-  const binary = await resolveCodexBinary(options.environment);
-  if (binary.status === "missing") {
-    return { status: "unverified", reason: "no_cli" };
-  }
+    const binary = await resolveCodexBinary(options.environment);
+    if (binary.status === "missing") {
+      return { status: "unverified", reason: "no_cli" };
+    }
 
-  const res = await probeCodexAppServer({
-    binaryPath: binary.path,
-    tokens,
-    environment: options.environment,
-  });
+    const res = await probeCodexAppServer({
+      binaryPath: binary.path,
+      tokens,
+      environment: options.environment,
+    });
 
-  if (res.status === "success") {
+    if (res.status === "success") {
+      return {
+        status: "success",
+        plan: res.plan,
+        account: res.account,
+        windows: res.windows ?? [],
+      };
+    }
+
     return {
-      status: "success",
-      plan: res.plan,
-      account: res.account,
-      windows: res.windows ?? [],
+      status: "failed",
+      error: res.error ?? "Codex probe failed",
+    };
+  } catch (error) {
+    return {
+      status: "failed",
+      error: error instanceof Error ? error.message : "Codex probe failed",
     };
   }
-
-  return {
-    status: "failed",
-    error: res.error ?? "Codex probe failed",
-  };
 }
