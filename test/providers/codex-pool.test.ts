@@ -1316,4 +1316,55 @@ describe("Codex CPA pool aggregation", () => {
       expect(acc.windows[0]?.resetText).toBe("cooling");
     }
   });
+
+  it("cooling records with empty or null reason do not auto-mark active", () => {
+    const cpaDir = join(tempDir, "cpa-empty-reason-cooling");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const nowMs = 1_770_000_000_000;
+    const futureCooling = new Date(nowMs + 3600_000).toISOString();
+
+    writeFileSync(
+      join(cpaDir, "codex-empty-reason.cds"),
+      JSON.stringify({
+        auth_id: "codex-empty-reason.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            reason: "",
+            next_retry_after: futureCooling,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    writeFileSync(
+      join(cpaDir, "codex-null-reason.cds"),
+      JSON.stringify({
+        auth_id: "codex-null-reason.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            reason: null,
+            next_retry_after: futureCooling,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = readCodexPool({ cpaDir, nowMs });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.pool?.accounts).toHaveLength(2);
+    expect(
+      result.quota.pool?.accounts.every((a) => a.status === "cooling"),
+    ).toBe(true);
+  });
 });
+

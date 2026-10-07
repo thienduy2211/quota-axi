@@ -97,19 +97,7 @@ function evaluateCooldownRecord(
     typeof rec.status === "string"
       ? rec.status.trim().toLowerCase()
       : undefined;
-  const reason =
-    typeof rec.reason === "string"
-      ? rec.reason.trim().toLowerCase()
-      : undefined;
-  const isStatusCleared =
-    rec.status === null ||
-    status === "" ||
-    status === "active" ||
-    status === "ready" ||
-    status === "available";
-  const isReasonCleared = rec.reason === null || reason === "";
-
-  if (isStatusCleared || isReasonCleared) {
+  if (status === "active") {
     return { isCooling: false, futureTimes: [] };
   }
 
