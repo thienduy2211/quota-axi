@@ -375,9 +375,10 @@ function primaryProviderRow(provider: ProviderQuota): AttentionRow | undefined {
     ...providerColumns(provider),
     scope: "all",
     kind,
-    detail: state.retryAfter
-      ? `${detail} retry after ${state.retryAfter}`
-      : detail,
+    detail:
+      state.retryAfter && !detail.includes(state.retryAfter)
+        ? `${detail} retry after ${state.retryAfter}`
+        : detail,
     remedy: state.remedyCommand ?? NONE,
   };
 }

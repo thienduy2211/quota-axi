@@ -77,6 +77,84 @@ type RawCodexAccount = {
   };
 };
 
+function parseTimestampMs(value: unknown): number | undefined {
+  const iso = parseEpochOrIso(value);
+  if (!iso) return undefined;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+function evaluateCooldownRecord(
+  rec: Record<string, unknown>,
+  nowMs: number,
+): {
+  isCooling: boolean;
+  hasTimestamps: boolean;
+  futureTimes: number[];
+  retryAfter?: string;
+  recoverAt?: string;
+} {
+  const status =
+    typeof rec.status === "string"
+      ? rec.status.trim().toLowerCase()
+      : undefined;
+
+  const quota =
+    rec.quota && typeof rec.quota === "object"
+      ? (rec.quota as Record<string, unknown>)
+      : undefined;
+
+  const retryAfterMs = parseTimestampMs(rec.next_retry_after);
+  const recoverAtMs = quota
+    ? parseTimestampMs(quota.next_recover_at)
+    : undefined;
+
+  const validMsList: number[] = [];
+  if (retryAfterMs !== undefined) validMsList.push(retryAfterMs);
+  if (recoverAtMs !== undefined) validMsList.push(recoverAtMs);
+  const hasTimestamps = validMsList.length > 0;
+
+  if (status === "active") {
+    return { isCooling: false, hasTimestamps, futureTimes: [] };
+  }
+
+  const quotaExceeded = quota?.exceeded === true;
+  const isQuotaCleared = quota?.exceeded === false && status !== "cooling";
+
+  if (isQuotaCleared) {
+    return { isCooling: false, hasTimestamps, futureTimes: [] };
+  }
+
+  const marksCooling = status === "cooling" || quotaExceeded;
+  if (!marksCooling) {
+    return { isCooling: false, hasTimestamps, futureTimes: [] };
+  }
+
+  if (hasTimestamps) {
+    const futureMsList = validMsList.filter((ms) => ms > nowMs);
+    if (futureMsList.length === 0) {
+      return { isCooling: false, hasTimestamps: true, futureTimes: [] };
+    }
+    const futureRetryAfter =
+      retryAfterMs !== undefined && retryAfterMs > nowMs
+        ? new Date(retryAfterMs).toISOString()
+        : undefined;
+    const futureRecoverAt =
+      recoverAtMs !== undefined && recoverAtMs > nowMs
+        ? new Date(recoverAtMs).toISOString()
+        : undefined;
+    return {
+      isCooling: true,
+      hasTimestamps: true,
+      futureTimes: futureMsList,
+      retryAfter: futureRetryAfter,
+      recoverAt: futureRecoverAt,
+    };
+  }
+
+  return { isCooling: true, hasTimestamps: false, futureTimes: [] };
+}
+
 export function readCodexPool(
   options: {
     registryPath?: string;
@@ -171,59 +249,52 @@ export function readCodexPool(
         const email = typeof cds.email === "string" ? cds.email : undefined;
         const plan = typeof cds.plan === "string" ? cds.plan : undefined;
 
-        const topStatus =
-          typeof cds.status === "string" ? cds.status : undefined;
-        const topQuotaExceeded =
-          cds.quota && typeof cds.quota === "object"
-            ? (cds.quota as Record<string, unknown>).exceeded === true
-            : false;
-        const topIsCooling = topStatus === "cooling" || topQuotaExceeded;
+        const rootEval = evaluateCooldownRecord(cds, nowMs);
+        const validRecords = records.filter((r): r is Record<string, unknown> =>
+          Boolean(r && typeof r === "object"),
+        );
 
-        let rootRetryAfter: string | undefined;
-        let rootRecoverAt: string | undefined;
-        if (topIsCooling) {
-          rootRetryAfter = parseEpochOrIso(cds.next_retry_after);
-          if (cds.quota && typeof cds.quota === "object") {
-            rootRecoverAt = parseEpochOrIso(
-              (cds.quota as Record<string, unknown>).next_recover_at,
-            );
-          }
-        }
-
-        let isCooling = topIsCooling;
+        let isCooling = false;
         const candidateRecoveryTimes: string[] = [];
-        if (rootRetryAfter) candidateRecoveryTimes.push(rootRetryAfter);
-        if (rootRecoverAt) candidateRecoveryTimes.push(rootRecoverAt);
-
         let recordRetryAfter: string | undefined;
         let recordRecoverAt: string | undefined;
 
-        for (const rec of records) {
-          if (!rec || typeof rec !== "object") continue;
-          const recStatus =
-            typeof rec.status === "string" ? rec.status : undefined;
-          const recExceeded =
-            rec.quota && typeof rec.quota === "object"
-              ? (rec.quota as Record<string, unknown>).exceeded === true
-              : false;
-          const recIsCooling = recStatus === "cooling" || recExceeded;
-          if (recIsCooling) {
-            isCooling = true;
-            const recNextRetryAfter = parseEpochOrIso(rec.next_retry_after);
-            if (recNextRetryAfter) {
-              candidateRecoveryTimes.push(recNextRetryAfter);
-              if (!recordRetryAfter) recordRetryAfter = recNextRetryAfter;
+        if (validRecords.length > 0) {
+          let anyRecordCooling = false;
+          let recordHasTimestamps = false;
+          for (const rec of validRecords) {
+            const recEval = evaluateCooldownRecord(rec, nowMs);
+            if (recEval.hasTimestamps) {
+              recordHasTimestamps = true;
             }
-            if (rec.quota && typeof rec.quota === "object") {
-              const recQuotaRecoverAt = parseEpochOrIso(
-                (rec.quota as Record<string, unknown>).next_recover_at,
-              );
-              if (recQuotaRecoverAt) {
-                candidateRecoveryTimes.push(recQuotaRecoverAt);
-                if (!recordRecoverAt) recordRecoverAt = recQuotaRecoverAt;
+            if (recEval.isCooling) {
+              anyRecordCooling = true;
+              if (recEval.retryAfter) {
+                candidateRecoveryTimes.push(recEval.retryAfter);
+                if (!recordRetryAfter) recordRetryAfter = recEval.retryAfter;
+              }
+              if (recEval.recoverAt) {
+                candidateRecoveryTimes.push(recEval.recoverAt);
+                if (!recordRecoverAt) recordRecoverAt = recEval.recoverAt;
               }
             }
           }
+          if (rootEval.retryAfter)
+            candidateRecoveryTimes.push(rootEval.retryAfter);
+          if (rootEval.recoverAt)
+            candidateRecoveryTimes.push(rootEval.recoverAt);
+
+          if (anyRecordCooling) {
+            isCooling = true;
+          } else if (rootEval.isCooling && !recordHasTimestamps) {
+            isCooling = true;
+          }
+        } else {
+          isCooling = rootEval.isCooling;
+          if (rootEval.retryAfter)
+            candidateRecoveryTimes.push(rootEval.retryAfter);
+          if (rootEval.recoverAt)
+            candidateRecoveryTimes.push(rootEval.recoverAt);
         }
 
         const validTimes = candidateRecoveryTimes
@@ -236,10 +307,10 @@ export function readCodexPool(
             : undefined;
 
         const nextRetryAfter = isCooling
-          ? (rootRetryAfter ?? recordRetryAfter ?? recoveryTime)
+          ? (recoveryTime ?? rootEval.retryAfter ?? recordRetryAfter)
           : undefined;
         const nextRecoverAt = isCooling
-          ? (rootRecoverAt ?? recordRecoverAt ?? recoveryTime)
+          ? (recoveryTime ?? rootEval.recoverAt ?? recordRecoverAt)
           : undefined;
 
         const updatedAt =
@@ -275,7 +346,6 @@ export function readCodexPool(
         const validAccounts = parsedCpaAccounts.filter((a) => !a.malformed);
         const allCooling =
           validAccounts.length > 0 && validAccounts.every((a) => a.cooling);
-        const anyCooling = validAccounts.some((a) => a.cooling);
 
         const coolingTimes = validAccounts
           .map((a) =>
@@ -297,11 +367,12 @@ export function readCodexPool(
             id: "pool",
             label: "pool",
             kind: "session",
-            ...(earliestRecovery
-              ? { resetsAt: earliestRecovery }
-              : anyCooling
-                ? { resetText: "cooling" }
-                : { resetText: "pool serving" }),
+            ...(earliestRecovery ? { resetsAt: earliestRecovery } : {}),
+            resetText: allCooling
+              ? earliestRecovery
+                ? `cooling until ${earliestRecovery}`
+                : "cooling"
+              : "pool serving",
           },
         ];
 
@@ -345,7 +416,10 @@ export function readCodexPool(
               label: "pool",
               kind: "session",
               ...(a.recoveryTime
-                ? { resetsAt: a.recoveryTime }
+                ? {
+                    resetsAt: a.recoveryTime,
+                    resetText: `cooling until ${a.recoveryTime}`,
+                  }
                 : { resetText: "cooling" }),
             });
           } else {
@@ -406,6 +480,12 @@ export function readCodexPool(
             status: allCooling ? "unavailable" : "fresh",
             stale: false,
             refreshedAt,
+            error: allCooling
+              ? earliestRecovery
+                ? `cooling until ${earliestRecovery}`
+                : "All pool accounts in cooldown"
+              : undefined,
+            retryAfter: allCooling ? earliestRecovery : undefined,
             sourcesTried: sourceNames(attempts),
           },
         };
