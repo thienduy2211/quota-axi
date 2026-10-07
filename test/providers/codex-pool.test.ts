@@ -1366,5 +1366,42 @@ describe("Codex CPA pool aggregation", () => {
       result.quota.pool?.accounts.every((a) => a.status === "cooling"),
     ).toBe(true);
   });
+
+  it("top-level cooling status does not override child records with expired cooldown timestamps", () => {
+    const cpaDir = join(tempDir, "cpa-root-cooling-expired-child");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const nowMs = 1_770_000_000_000;
+    const expiredPast = new Date(nowMs - 5000).toISOString();
+
+    writeFileSync(
+      join(cpaDir, "codex-expired-child.cds"),
+      JSON.stringify({
+        auth_id: "codex-expired-child.json",
+        provider: "codex",
+        status: "cooling",
+        records: [
+          {
+            status: "cooling",
+            next_retry_after: expiredPast,
+            quota: { exceeded: true, next_recover_at: expiredPast },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = readCodexPool({ cpaDir, nowMs });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.quota.state.status).toBe("fresh");
+    const acc = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-expired-child.json",
+    );
+    expect(acc?.status).toBe("active");
+    expect(acc?.nextRetryAfter).toBeUndefined();
+  });
 });
+
 

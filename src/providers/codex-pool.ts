@@ -89,6 +89,7 @@ function evaluateCooldownRecord(
   nowMs: number,
 ): {
   isCooling: boolean;
+  hasTimestamps: boolean;
   futureTimes: number[];
   retryAfter?: string;
   recoverAt?: string;
@@ -97,25 +98,11 @@ function evaluateCooldownRecord(
     typeof rec.status === "string"
       ? rec.status.trim().toLowerCase()
       : undefined;
-  if (status === "active") {
-    return { isCooling: false, futureTimes: [] };
-  }
 
   const quota =
     rec.quota && typeof rec.quota === "object"
       ? (rec.quota as Record<string, unknown>)
       : undefined;
-  const quotaExceeded = quota?.exceeded === true;
-  const isQuotaCleared = quota?.exceeded === false && status !== "cooling";
-
-  if (isQuotaCleared) {
-    return { isCooling: false, futureTimes: [] };
-  }
-
-  const marksCooling = status === "cooling" || quotaExceeded;
-  if (!marksCooling) {
-    return { isCooling: false, futureTimes: [] };
-  }
 
   const retryAfterMs = parseTimestampMs(rec.next_retry_after);
   const recoverAtMs = quota
@@ -125,12 +112,28 @@ function evaluateCooldownRecord(
   const validMsList: number[] = [];
   if (retryAfterMs !== undefined) validMsList.push(retryAfterMs);
   if (recoverAtMs !== undefined) validMsList.push(recoverAtMs);
+  const hasTimestamps = validMsList.length > 0;
 
-  if (validMsList.length > 0) {
+  if (status === "active") {
+    return { isCooling: false, hasTimestamps, futureTimes: [] };
+  }
+
+  const quotaExceeded = quota?.exceeded === true;
+  const isQuotaCleared = quota?.exceeded === false && status !== "cooling";
+
+  if (isQuotaCleared) {
+    return { isCooling: false, hasTimestamps, futureTimes: [] };
+  }
+
+  const marksCooling = status === "cooling" || quotaExceeded;
+  if (!marksCooling) {
+    return { isCooling: false, hasTimestamps, futureTimes: [] };
+  }
+
+  if (hasTimestamps) {
     const futureMsList = validMsList.filter((ms) => ms > nowMs);
     if (futureMsList.length === 0) {
-      // Cooldown has expired (all timestamps are in the past)
-      return { isCooling: false, futureTimes: [] };
+      return { isCooling: false, hasTimestamps: true, futureTimes: [] };
     }
     const futureRetryAfter =
       retryAfterMs !== undefined && retryAfterMs > nowMs
@@ -142,14 +145,14 @@ function evaluateCooldownRecord(
         : undefined;
     return {
       isCooling: true,
+      hasTimestamps: true,
       futureTimes: futureMsList,
       retryAfter: futureRetryAfter,
       recoverAt: futureRecoverAt,
     };
   }
 
-  // Cooling without explicit recovery timestamps
-  return { isCooling: true, futureTimes: [] };
+  return { isCooling: true, hasTimestamps: false, futureTimes: [] };
 }
 
 export function readCodexPool(
@@ -261,11 +264,7 @@ export function readCodexPool(
           let recordHasTimestamps = false;
           for (const rec of validRecords) {
             const recEval = evaluateCooldownRecord(rec, nowMs);
-            if (
-              recEval.futureTimes.length > 0 ||
-              recEval.retryAfter ||
-              recEval.recoverAt
-            ) {
+            if (recEval.hasTimestamps) {
               recordHasTimestamps = true;
             }
             if (recEval.isCooling) {
