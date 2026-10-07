@@ -13,7 +13,7 @@ import {
   inspectAuth,
 } from "../../src/providers/codex.js";
 import { withQuotaSemantics } from "../../src/interpretation.js";
-import { quotaJsonReport } from "../../src/render.js";
+import { quotaJsonReport, renderQuotaToon } from "../../src/render.js";
 import type { ProviderOptions, QuotaAxiResponse } from "../../src/types.js";
 
 const OPTIONS: ProviderOptions = {
@@ -770,6 +770,7 @@ describe("Codex CPA pool aggregation", () => {
     const cpaDir = join(tempDir, "cpa-all-cooling");
     mkdirSync(cpaDir, { recursive: true });
 
+    const nowMs = Date.parse("2026-10-06T12:00:00.000Z");
     const tEarlier = "2026-10-06T14:27:34.000Z";
     const tLater = "2026-10-10T14:17:55.000Z";
 
@@ -805,12 +806,15 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir });
+    const result = readCodexPool({ cpaDir, nowMs });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
     expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.retryAfter).toBe(tEarlier);
+    expect(result.quota.state.error).toBe("cooling until " + tEarlier);
     expect(result.quota.windows[0].resetsAt).toBe(tEarlier);
+    expect(result.quota.windows[0].resetText).toBe("cooling until " + tEarlier);
     expect(result.quota.pool?.accounts).toHaveLength(2);
     expect(
       result.quota.pool?.accounts.every((a) => a.status === "cooling"),
@@ -1070,5 +1074,246 @@ describe("Codex CPA pool aggregation", () => {
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
     expect(result.source).toBe("registry");
+  });
+
+  it("all-cooling CPA pool with recovery timestamps surfaces earliest recovery headline and retryAfter", () => {
+    const cpaDir = join(tempDir, "cpa-all-cooling-recovery");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const nowMs = 1_770_000_000_000;
+    const tEarliest = new Date(nowMs + 60_000).toISOString();
+    const tMiddle = new Date(nowMs + 3600_000).toISOString();
+    const tLatest = new Date(nowMs + 7200_000).toISOString();
+
+    // Account 1: cools until +2h
+    writeFileSync(
+      join(cpaDir, "codex-1.cds"),
+      JSON.stringify({
+        auth_id: "codex-1.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            next_retry_after: tLatest,
+            quota: { exceeded: true, next_recover_at: tLatest },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    // Account 2: cools until +1m (earliest recovery)
+    writeFileSync(
+      join(cpaDir, "codex-2.cds"),
+      JSON.stringify({
+        auth_id: "codex-2.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            next_retry_after: tEarliest,
+            quota: { exceeded: true, next_recover_at: tEarliest },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    // Account 3: cools until +1h
+    writeFileSync(
+      join(cpaDir, "codex-3.cds"),
+      JSON.stringify({
+        auth_id: "codex-3.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            next_retry_after: tMiddle,
+            quota: { exceeded: true, next_recover_at: tMiddle },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = readCodexPool({ cpaDir, nowMs });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    // Headline state carries earliest recovery timestamp and formatted error/retryAfter
+    expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.retryAfter).toBe(tEarliest);
+    expect(result.quota.state.error).toBe(`cooling until ${tEarliest}`);
+
+    // Headline window carries earliest recovery timestamp and resetText
+    const headline = result.quota.windows[0];
+    expect(headline?.resetsAt).toBe(tEarliest);
+    expect(headline?.resetText).toBe(`cooling until ${tEarliest}`);
+
+    // Per-account detail
+    expect(result.quota.pool?.accounts).toHaveLength(3);
+    const acc2 = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-2.json",
+    );
+    expect(acc2?.status).toBe("cooling");
+    expect(acc2?.nextRetryAfter).toBe(tEarliest);
+    expect(acc2?.windows[0]?.resetsAt).toBe(tEarliest);
+    expect(acc2?.windows[0]?.resetText).toBe(`cooling until ${tEarliest}`);
+
+    // TOON rendering surfaces the cooling until detail cleanly without duplicate retryAfter
+    const toon = renderQuotaToon(
+      {
+        generatedAt: new Date(nowMs).toISOString(),
+        schemaVersion: 6,
+        providers: [result.quota],
+      },
+      "quota-axi",
+      false,
+    );
+    expect(toon).toContain(`cooling until ${tEarliest}`);
+    expect(toon).not.toContain(`retry after ${tEarliest}`);
+  });
+
+  it("expired cooldown records are treated as usable active accounts and do not count as cooling", () => {
+    const cpaDir = join(tempDir, "cpa-expired-cooldown");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const nowMs = 1_770_000_000_000;
+    const expiredPast = new Date(nowMs - 5000).toISOString();
+    const futureCooling = new Date(nowMs + 3600_000).toISOString();
+
+    // Account 1: transient 429 expired 5s ago
+    writeFileSync(
+      join(cpaDir, "codex-transient-recovered.cds"),
+      JSON.stringify({
+        auth_id: "codex-transient.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            reason: "rate_limit_exceeded",
+            next_retry_after: expiredPast,
+            quota: { exceeded: true, next_recover_at: expiredPast },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    // Account 2: cooldown explicitly cleared (status: active, reason: "")
+    writeFileSync(
+      join(cpaDir, "codex-cleared.cds"),
+      JSON.stringify({
+        auth_id: "codex-cleared.json",
+        provider: "codex",
+        records: [
+          {
+            status: "active",
+            reason: "",
+            quota: { exceeded: false },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    // Account 3: still in real 1h cooldown
+    writeFileSync(
+      join(cpaDir, "codex-team-cooling.cds"),
+      JSON.stringify({
+        auth_id: "codex-team.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            reason: "quota",
+            next_retry_after: futureCooling,
+            quota: { exceeded: true, next_recover_at: futureCooling },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = readCodexPool({ cpaDir, nowMs });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    // Pool reports fresh because accounts 1 & 2 are usable
+    expect(result.quota.state.status).toBe("fresh");
+    expect(result.quota.state.stale).toBe(false);
+    expect(result.quota.state.error).toBeUndefined();
+    expect(result.quota.state.retryAfter).toBeUndefined();
+
+    // Headline window reports serving
+    expect(result.quota.windows[0]?.resetText).toBe("pool serving");
+
+    // Accounts 1 and 2 are active, Account 3 is cooling
+    const acc1 = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-transient.json",
+    );
+    expect(acc1?.status).toBe("active");
+    expect(acc1?.nextRetryAfter).toBeUndefined();
+
+    const acc2 = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-cleared.json",
+    );
+    expect(acc2?.status).toBe("active");
+
+    const acc3 = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-team.json",
+    );
+    expect(acc3?.status).toBe("cooling");
+    expect(acc3?.nextRetryAfter).toBe(futureCooling);
+    expect(acc3?.windows[0]?.resetsAt).toBe(futureCooling);
+  });
+
+  it("genuinely-exhausted pool without recovery timestamps reports unavailable without retryAfter", () => {
+    const cpaDir = join(tempDir, "cpa-genuinely-exhausted");
+    mkdirSync(cpaDir, { recursive: true });
+
+    // Both accounts in cooling with no recovery timestamps
+    writeFileSync(
+      join(cpaDir, "codex-exhausted-1.cds"),
+      JSON.stringify({
+        auth_id: "codex-ex-1.json",
+        provider: "codex",
+        status: "cooling",
+      }),
+      "utf8",
+    );
+
+    writeFileSync(
+      join(cpaDir, "codex-exhausted-2.cds"),
+      JSON.stringify({
+        auth_id: "codex-ex-2.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            quota: { exceeded: true },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = readCodexPool({ cpaDir });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.retryAfter).toBeUndefined();
+    expect(result.quota.state.error).toBe("All pool accounts in cooldown");
+    expect(result.quota.windows[0]?.resetsAt).toBeUndefined();
+    expect(result.quota.windows[0]?.resetText).toBe("cooling");
+
+    expect(result.quota.pool?.accounts).toHaveLength(2);
+    for (const acc of result.quota.pool?.accounts ?? []) {
+      expect(acc.status).toBe("cooling");
+      expect(acc.nextRetryAfter).toBeUndefined();
+      expect(acc.windows[0]?.resetsAt).toBeUndefined();
+      expect(acc.windows[0]?.resetText).toBe("cooling");
+    }
   });
 });
