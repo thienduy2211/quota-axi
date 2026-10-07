@@ -355,6 +355,8 @@ export type ProviderQuota = {
      * (kept in default `--json` when this is set) says when it was taken.
      */
     reused?: true;
+    cooldownUnverified?: boolean;
+    unverified?: boolean;
   };
   attempts?: SourceAttempt[];
   /**
@@ -380,6 +382,11 @@ export type PoolAccountDetail = {
   cooldowns?: Record<string, number>;
   fetchedAt?: string;
   windows: QuotaWindow[];
+  stale?: boolean;
+  recovered?: boolean;
+  unverified?: boolean;
+  cooldownUnverified?: boolean;
+  note?: string;
 };
 
 export type PoolDetail = {
