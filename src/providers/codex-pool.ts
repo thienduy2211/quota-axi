@@ -349,7 +349,6 @@ function buildCpaPoolResult(
   const allCooling =
     validAccounts.length > 0 && validAccounts.every((a) => a.cooling);
   const anyUnverified = validAccounts.some((a) => a.unverified);
-  const anyRecovered = validAccounts.some((a) => a.recovered);
 
   const coolingTimes = validAccounts
     .map((a) =>
@@ -419,6 +418,11 @@ function buildCpaPoolResult(
           status: "failed",
           error: a.probeError,
         });
+      } else if (!a.unverified && a.windows) {
+        attempts.push({
+          source: `cli-rpc:${a.accountKey}`,
+          status: "success",
+        });
       } else {
         attempts.push({
           source: `cli-rpc:${a.accountKey}`,
@@ -471,8 +475,8 @@ function buildCpaPoolResult(
       accountKey: a.accountKey,
       plan: a.plan,
       status: a.cooling ? "cooling" : "active",
-      nextRetryAfter: a.nextRetryAfter,
-      nextRecoverAt: a.nextRecoverAt,
+      nextRetryAfter: a.cooling ? a.nextRetryAfter : undefined,
+      nextRecoverAt: a.cooling ? a.nextRecoverAt : undefined,
       windows: accWindows,
       stale: a.stale,
       recovered: a.recovered,
@@ -519,7 +523,7 @@ function buildCpaPoolResult(
     },
     state: {
       status: allCooling ? "unavailable" : "fresh",
-      stale: anyRecovered,
+      stale: false,
       refreshedAt,
       error: allCooling
         ? earliestRecovery
@@ -540,6 +544,72 @@ function buildCpaPoolResult(
     source: "cpa",
     path: cpaDir,
   };
+}
+
+function isWindowExhausted(window: QuotaWindow): boolean {
+  if (window.percentRemaining !== undefined && window.percentRemaining <= 0) {
+    return true;
+  }
+  if (window.percentUsed !== undefined && window.percentUsed >= 100) {
+    return true;
+  }
+  return false;
+}
+
+function applyProbeSuccess(
+  a: ParsedCpaAccount,
+  res: {
+    plan?: string;
+    account?: ProviderQuota["account"];
+    windows?: QuotaWindow[];
+  },
+): void {
+  const windows =
+    res.windows && res.windows.length > 0 ? res.windows : undefined;
+  const isExhausted = windows?.some(isWindowExhausted) ?? false;
+  if (!isExhausted) {
+    a.cooling = false;
+    a.recovered = true;
+    a.stale = undefined;
+    a.unverified = undefined;
+    a.cooldownUnverified = undefined;
+    a.note = undefined;
+    a.probeError = undefined;
+    a.nextRetryAfter = undefined;
+    a.nextRecoverAt = undefined;
+    a.recoveryTime = undefined;
+  } else {
+    a.cooling = true;
+    a.recovered = undefined;
+    a.stale = undefined;
+    a.unverified = undefined;
+    a.cooldownUnverified = undefined;
+    a.note = undefined;
+    a.probeError = undefined;
+    const exhaustedWindows = (windows ?? []).filter(isWindowExhausted);
+    const resetTimes = exhaustedWindows
+      .map((w) => (w.resetsAt ? Date.parse(w.resetsAt) : undefined))
+      .filter(
+        (ms): ms is number => typeof ms === "number" && Number.isFinite(ms),
+      );
+    if (resetTimes.length > 0) {
+      const earliest = new Date(Math.min(...resetTimes)).toISOString();
+      a.recoveryTime = earliest;
+      a.nextRetryAfter = earliest;
+      a.nextRecoverAt = earliest;
+    }
+  }
+  a.windows = windows;
+  if (res.plan) a.plan = res.plan;
+  if (res.account?.email) a.email = res.account.email;
+}
+
+function applyProbeFailure(a: ParsedCpaAccount, error?: string): void {
+  a.unverified = true;
+  a.note = "cooldown unverified";
+  a.cooldownUnverified = true;
+  a.probeError = error;
+  a.stale = true;
 }
 
 export async function readCodexPool(
@@ -584,30 +654,17 @@ export async function readCodexPool(
                 cpaDir,
               });
               if (res?.status === "success") {
-                a.cooling = false;
-                a.recovered = true;
-                a.stale = true;
-                a.windows =
-                  res.windows && res.windows.length > 0
-                    ? res.windows
-                    : undefined;
-                if (res.plan) a.plan = res.plan;
-                if (res.account?.email) a.email = res.account.email;
+                applyProbeSuccess(a, res);
               } else if (res?.status === "failed") {
-                a.unverified = true;
-                a.note = "cooldown unverified";
-                a.cooldownUnverified = true;
-                a.probeError = res.error;
+                applyProbeFailure(a, res.error);
               } else {
-                a.unverified = true;
-                a.note = "cooldown unverified";
-                a.cooldownUnverified = true;
+                applyProbeFailure(a);
               }
             } catch (err) {
-              a.unverified = true;
-              a.note = "cooldown unverified";
-              a.cooldownUnverified = true;
-              a.probeError = err instanceof Error ? err.message : String(err);
+              applyProbeFailure(
+                a,
+                err instanceof Error ? err.message : String(err),
+              );
             }
           } else {
             const res = await probeCodexCredential({
@@ -617,72 +674,17 @@ export async function readCodexPool(
               environment,
             });
             if (res.status === "success") {
-              a.cooling = false;
-              a.recovered = true;
-              a.stale = true;
-              a.windows =
-                res.windows && res.windows.length > 0 ? res.windows : undefined;
-              if (res.plan) a.plan = res.plan;
-              if (res.account?.email) a.email = res.account.email;
+              applyProbeSuccess(a, res);
             } else if (res.status === "failed") {
-              a.unverified = true;
-              a.note = "cooldown unverified";
-              a.cooldownUnverified = true;
-              a.probeError = res.error;
+              applyProbeFailure(a, res.error);
             } else {
-              a.unverified = true;
-              a.note = "cooldown unverified";
-              a.cooldownUnverified = true;
+              applyProbeFailure(a);
             }
           }
         }
       } else {
         for (const a of coolingAccounts) {
-          a.unverified = true;
-          a.note = "cooldown unverified";
-          a.cooldownUnverified = true;
-        }
-      }
-
-      return buildCpaPoolResult(parsedCpaAccounts, cpaDir);
-    }
-  }
-
-  return readRegistryFallback(options);
-}
-
-export function readCodexPoolSync(
-  options: ReadCodexPoolOptions = {},
-): CodexPoolResult {
-  const environment = options.environment ?? process.env;
-  const nowMs = options.nowMs ?? Date.now();
-
-  const testRegistryExplicit =
-    options.registryPath !== undefined && options.cpaDir === undefined;
-
-  if (!testRegistryExplicit) {
-    const cpaDir = options.cpaDir ?? resolveCpaStateDir(environment);
-    const { hasCodexFiles, parsedCpaAccounts } = parseCpaFiles(cpaDir, nowMs);
-
-    if (hasCodexFiles) {
-      if (
-        parsedCpaAccounts.length === 0 ||
-        parsedCpaAccounts.every((a) => a.malformed)
-      ) {
-        return {
-          kind: "malformed",
-          error: "malformed_cds",
-          failure: poolMalformedFailure("malformed_cds", "unavailable"),
-          source: "cpa",
-          path: cpaDir,
-        };
-      }
-
-      for (const a of parsedCpaAccounts) {
-        if (!a.malformed && a.cooling) {
-          a.unverified = true;
-          a.note = "cooldown unverified";
-          a.cooldownUnverified = true;
+          applyProbeFailure(a);
         }
       }
 

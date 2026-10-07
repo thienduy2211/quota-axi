@@ -1461,14 +1461,16 @@ describe("Codex CPA pool aggregation", () => {
 
     expect(probeCalls).toHaveLength(1);
     expect(result.quota.state.status).toBe("fresh");
-    expect(result.quota.state.stale).toBe(true);
+    expect(result.quota.state.stale).toBe(false);
 
     const poolAccounts = result.quota.pool?.accounts;
     expect(poolAccounts).toHaveLength(1);
     const acc = poolAccounts![0];
     expect(acc.status).toBe("active");
     expect(acc.recovered).toBe(true);
-    expect(acc.stale).toBe(true);
+    expect(acc.stale).toBeUndefined();
+    expect(acc.nextRetryAfter).toBeUndefined();
+    expect(acc.nextRecoverAt).toBeUndefined();
     expect(acc.plan).toBe("team");
     expect(acc.email).toBe("probed-user@example.com");
     expect(
@@ -1518,7 +1520,7 @@ describe("Codex CPA pool aggregation", () => {
       nowMs,
       probe: async () => ({
         status: "failed",
-        error: "rate_limit_exceeded",
+        error: "network_error",
       }),
     });
 
@@ -1526,6 +1528,7 @@ describe("Codex CPA pool aggregation", () => {
     if (result.kind !== "success") return;
 
     expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.stale).toBe(false);
     expect(result.quota.state.cooldownUnverified).toBe(true);
     expect(result.quota.state.unverified).toBe(true);
 
@@ -1534,12 +1537,91 @@ describe("Codex CPA pool aggregation", () => {
     expect(acc?.unverified).toBe(true);
     expect(acc?.cooldownUnverified).toBe(true);
     expect(acc?.note).toBe("cooldown unverified");
+    expect(acc?.stale).toBe(true);
 
     const rpcAttempt = result.quota.attempts?.find(
       (a) => a.source === "cli-rpc:codex-cooling-fail.json",
     );
     expect(rpcAttempt?.status).toBe("failed");
-    expect(rpcAttempt?.error).toBe("rate_limit_exceeded");
+    expect(rpcAttempt?.error).toBe("network_error");
+  });
+
+  it("fixture .cds with future cooling + probe succeeds with exhausted session window -> cooldown verified with vendor windows, not active and not unverified", async () => {
+    const cpaDir = join(tempDir, "cpa-probe-exhausted");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const nowMs = 1_770_000_000_000;
+    const futureCooling = new Date(nowMs + 86400 * 1000).toISOString();
+
+    writeFileSync(
+      join(cpaDir, "codex-cooling-exhausted.cds"),
+      JSON.stringify({
+        auth_id: "codex-cooling-exhausted.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            next_retry_after: futureCooling,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({
+      cpaDir,
+      nowMs,
+      probe: async () => ({
+        status: "success",
+        plan: "team",
+        account: { email: "exhausted-user@example.com" },
+        windows: [
+          {
+            id: "five_hour",
+            label: "session",
+            kind: "session",
+            percentUsed: 100,
+            percentRemaining: 0,
+            resetsAt: futureCooling,
+          },
+          {
+            id: "weekly",
+            label: "week",
+            kind: "weekly",
+            percentUsed: 20,
+            percentRemaining: 80,
+          },
+        ],
+      }),
+    });
+
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.stale).toBe(false);
+    expect(result.quota.state.cooldownUnverified).toBeUndefined();
+    expect(result.quota.state.unverified).toBeUndefined();
+
+    const poolAccounts = result.quota.pool?.accounts;
+    expect(poolAccounts).toHaveLength(1);
+    const acc = poolAccounts![0];
+    expect(acc.status).toBe("cooling");
+    expect(acc.recovered).toBeUndefined();
+    expect(acc.unverified).toBeUndefined();
+    expect(acc.cooldownUnverified).toBeUndefined();
+    expect(acc.note).toBeUndefined();
+    expect(
+      acc.windows.find((w) => w.id === "five_hour")?.percentRemaining,
+    ).toBe(0);
+    expect(
+      result.quota.windows.find((w) => w.id === "five_hour")?.percentRemaining,
+    ).toBe(0);
+
+    const rpcAttempt = result.quota.attempts?.find(
+      (a) => a.source === "cli-rpc:codex-cooling-exhausted.json",
+    );
+    expect(rpcAttempt?.status).toBe("success");
   });
 
   it("fixture .cds with future cooling + probe cannot run -> cooling verdict stands with unverified note", async () => {
@@ -1573,12 +1655,14 @@ describe("Codex CPA pool aggregation", () => {
     if (result.kind !== "success") return;
 
     expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.stale).toBe(false);
     expect(result.quota.state.cooldownUnverified).toBe(true);
     expect(result.quota.state.unverified).toBe(true);
 
     const acc = result.quota.pool?.accounts[0];
     expect(acc?.status).toBe("cooling");
     expect(acc?.unverified).toBe(true);
+    expect(acc?.stale).toBe(true);
     expect(acc?.note).toBe("cooldown unverified");
 
     const rpcAttempt = result.quota.attempts?.find(

@@ -42,8 +42,8 @@ describe("Codex probe helpers", () => {
         accessToken: "test-access-token",
         accountId: "acct-123",
         idToken: "test-id-token",
-        refreshToken: "test-refresh-token",
       });
+      expect(tokens).not.toHaveProperty("refreshToken");
     });
 
     it("extracts tokens from root-level fields (camelCase and snake_case)", () => {
@@ -62,8 +62,8 @@ describe("Codex probe helpers", () => {
         accessToken: "camel-access",
         accountId: "camel-acct",
         idToken: undefined,
-        refreshToken: undefined,
       });
+      expect(tokens).not.toHaveProperty("refreshToken");
     });
 
     it("returns undefined for missing or invalid JSON", () => {

@@ -42,7 +42,6 @@ export type CodexAuthTokens = {
   accessToken: string;
   accountId?: string;
   idToken?: string;
-  refreshToken?: string;
 };
 
 export async function resolveCodexBinary(
@@ -138,15 +137,7 @@ export function extractCodexTokensFromFile(
     (typeof data.idToken === "string" && data.idToken.trim()) ||
     undefined;
 
-  const refreshToken =
-    (typeof tokens?.refresh_token === "string" &&
-      tokens.refresh_token.trim()) ||
-    (typeof tokens?.refreshToken === "string" && tokens.refreshToken.trim()) ||
-    (typeof data.refresh_token === "string" && data.refresh_token.trim()) ||
-    (typeof data.refreshToken === "string" && data.refreshToken.trim()) ||
-    undefined;
-
-  return { accessToken, accountId, idToken, refreshToken };
+  return { accessToken, accountId, idToken };
 }
 
 export function findCodexCredentialFile(options: {
@@ -208,7 +199,6 @@ export async function probeCodexAppServer(options: {
         access_token: tokens.accessToken,
         ...(tokens.accountId ? { account_id: tokens.accountId } : {}),
         ...(tokens.idToken ? { id_token: tokens.idToken } : {}),
-        ...(tokens.refreshToken ? { refresh_token: tokens.refreshToken } : {}),
       },
     };
     writeFileSync(authJsonPath, JSON.stringify(authPayload), {
@@ -323,13 +313,6 @@ export async function probeCodexAppServer(options: {
     const quota = normalizeCodexUsage(merged);
     if (!quota || quota.windows.length === 0) {
       return { status: "failed", error: "Codex quota unavailable" };
-    }
-
-    const allExhausted = quota.windows.every(
-      (w) => w.percentUsed !== undefined && w.percentUsed >= 100,
-    );
-    if (allExhausted) {
-      return { status: "failed", error: "rate_limit_exceeded" };
     }
 
     return {
