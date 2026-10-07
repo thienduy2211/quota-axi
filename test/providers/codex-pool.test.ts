@@ -59,16 +59,16 @@ describe("Codex CPA pool aggregation", () => {
     );
   });
 
-  it("returns missing when registry file does not exist", () => {
-    const result = readCodexPool({
+  it("returns missing when registry file does not exist", async () => {
+    const result = await readCodexPool({
       registryPath: join(tempDir, "nonexistent.json"),
     });
     expect(result.kind).toBe("missing");
   });
 
-  it("returns malformed when registry JSON is invalid syntax", () => {
+  it("returns malformed when registry JSON is invalid syntax", async () => {
     writeFileSync(registryFile, "not-valid-json", "utf8");
-    const result = readCodexPool({ registryPath: registryFile });
+    const result = await readCodexPool({ registryPath: registryFile });
     expect(result.kind).toBe("malformed");
     if (result.kind === "malformed") {
       expect(result.failure.provider).toBe("codex");
@@ -77,16 +77,16 @@ describe("Codex CPA pool aggregation", () => {
     }
   });
 
-  it("returns malformed when registry accounts array is empty", () => {
+  it("returns malformed when registry accounts array is empty", async () => {
     writeFileSync(registryFile, JSON.stringify({ accounts: [] }), "utf8");
-    const result = readCodexPool({ registryPath: registryFile });
+    const result = await readCodexPool({ registryPath: registryFile });
     expect(result.kind).toBe("malformed");
     if (result.kind === "malformed") {
       expect(result.error).toBe("no_accounts_in_registry");
     }
   });
 
-  it("returns malformed when no account reports valid quota usage", () => {
+  it("returns malformed when no account reports valid quota usage", async () => {
     const fixture = {
       accounts: [
         {
@@ -101,14 +101,14 @@ describe("Codex CPA pool aggregation", () => {
       ],
     };
     writeFileSync(registryFile, JSON.stringify(fixture), "utf8");
-    const result = readCodexPool({ registryPath: registryFile });
+    const result = await readCodexPool({ registryPath: registryFile });
     expect(result.kind).toBe("malformed");
     if (result.kind === "malformed") {
       expect(result.error).toBe("missing_quota_usage");
     }
   });
 
-  it("aggregates only over accounts reporting each window and omits missing windows from pool accounts", () => {
+  it("aggregates only over accounts reporting each window and omits missing windows from pool accounts", async () => {
     const nowS = 1_700_000_000;
     const nowMs = nowS * 1000;
 
@@ -140,7 +140,7 @@ describe("Codex CPA pool aggregation", () => {
 
     writeFileSync(registryFile, JSON.stringify(fixture), "utf8");
 
-    const result = readCodexPool({ registryPath: registryFile, nowMs });
+    const result = await readCodexPool({ registryPath: registryFile, nowMs });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -172,7 +172,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(acc3?.windows).toHaveLength(0);
   });
 
-  it("aggregates all-healthy pool of 4 accounts accurately", () => {
+  it("aggregates all-healthy pool of 4 accounts accurately", async () => {
     const nowS = 1_700_000_000;
     const nowMs = nowS * 1000;
 
@@ -225,7 +225,7 @@ describe("Codex CPA pool aggregation", () => {
 
     writeFileSync(registryFile, JSON.stringify(fixture), "utf8");
 
-    const result = readCodexPool({ registryPath: registryFile, nowMs });
+    const result = await readCodexPool({ registryPath: registryFile, nowMs });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -281,7 +281,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(quota.pool?.accounts[0].status).toBe("available");
   });
 
-  it("preserves pool headline runway when one account is near-empty (vtdtdah001 ~1.4% case)", () => {
+  it("preserves pool headline runway when one account is near-empty (vtdtdah001 ~1.4% case)", async () => {
     const nowS = 1_700_000_000;
     const nowMs = nowS * 1000;
 
@@ -333,7 +333,7 @@ describe("Codex CPA pool aggregation", () => {
 
     writeFileSync(registryFile, JSON.stringify(fixture), "utf8");
 
-    const result = readCodexPool({ registryPath: registryFile, nowMs });
+    const result = await readCodexPool({ registryPath: registryFile, nowMs });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -345,7 +345,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(weekly?.percentRemaining).toBeGreaterThan(50);
   });
 
-  it("marks pool cache stale when usage is older than one hour", () => {
+  it("marks pool cache stale when usage is older than one hour", async () => {
     const nowS = 1_700_000_000;
     const nowMs = nowS * 1000;
     const staleUsageS = nowS - 4000; // > 3600s ago
@@ -366,7 +366,7 @@ describe("Codex CPA pool aggregation", () => {
 
     writeFileSync(registryFile, JSON.stringify(fixture), "utf8");
 
-    const result = readCodexPool({ registryPath: registryFile, nowMs });
+    const result = await readCodexPool({ registryPath: registryFile, nowMs });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -374,7 +374,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(result.quota.state.status).toBe("stale");
   });
 
-  it("marks pool cache stale when lastUsageAt is absent across accounts", () => {
+  it("marks pool cache stale when lastUsageAt is absent across accounts", async () => {
     const nowS = 1_700_000_000;
     const nowMs = nowS * 1000;
 
@@ -393,7 +393,7 @@ describe("Codex CPA pool aggregation", () => {
 
     writeFileSync(registryFile, JSON.stringify(fixture), "utf8");
 
-    const result = readCodexPool({ registryPath: registryFile, nowMs });
+    const result = await readCodexPool({ registryPath: registryFile, nowMs });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -401,7 +401,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(result.quota.state.status).toBe("stale");
   });
 
-  it("never parses, retains, logs, or renders credential fields", () => {
+  it("never parses, retains, logs, or renders credential fields", async () => {
     const fixture = {
       accounts: [
         {
@@ -422,7 +422,7 @@ describe("Codex CPA pool aggregation", () => {
 
     writeFileSync(registryFile, JSON.stringify(fixture), "utf8");
 
-    const result = readCodexPool({ registryPath: registryFile });
+    const result = await readCodexPool({ registryPath: registryFile });
     expect(result.kind).toBe("success");
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain("POISON");
@@ -473,7 +473,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(poolSource?.path).toBe(registryFile);
   });
 
-  it("preserves consumer compatibility with schema 5 and schema 6 in quotaJsonReport", () => {
+  it("preserves consumer compatibility with schema 5 and schema 6 in quotaJsonReport", async () => {
     const fixture = {
       active_account_key: "acc-1",
       accounts: [
@@ -491,7 +491,7 @@ describe("Codex CPA pool aggregation", () => {
     };
     writeFileSync(registryFile, JSON.stringify(fixture), "utf8");
 
-    const poolResult = readCodexPool({ registryPath: registryFile });
+    const poolResult = await readCodexPool({ registryPath: registryFile });
     expect(poolResult.kind).toBe("success");
     if (poolResult.kind !== "success") return;
 
@@ -534,7 +534,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(resolveCpaStateDir({ CPA_DIR: "/custom/cpa" })).toBe("/custom/cpa");
   });
 
-  it("fixture .cds dir with one cooling + one active credential yields earliest recovery = the cooling credential's time", () => {
+  it("fixture .cds dir with one cooling + one active credential yields earliest recovery = the cooling credential's time", async () => {
     const cpaDir = join(tempDir, "cpa-cooling-active");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -582,7 +582,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir });
+    const result = await readCodexPool({ cpaDir });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -640,7 +640,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(activeAttempt?.status).toBe("success");
   });
 
-  it("all-active yields healthy", () => {
+  it("all-active yields healthy", async () => {
     const cpaDir = join(tempDir, "cpa-all-active");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -665,7 +665,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir });
+    const result = await readCodexPool({ cpaDir });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -687,7 +687,7 @@ describe("Codex CPA pool aggregation", () => {
     ).toBe(true);
   });
 
-  it("no .cds dir yields the registry fallback", () => {
+  it("no .cds dir yields the registry fallback", async () => {
     const nonexistentCpaDir = join(tempDir, "nonexistent-cpa");
     const fallbackRegistry = join(tempDir, "fallback-registry.json");
     writeFileSync(
@@ -707,7 +707,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({
+    const result = await readCodexPool({
       cpaDir: nonexistentCpaDir,
       registryPath: fallbackRegistry,
       nowMs: 1_700_000_000 * 1000,
@@ -721,7 +721,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(result.quota.windows.some((w) => w.id === "five_hour")).toBe(true);
   });
 
-  it("malformed .cds degrades to a marked unavailable state, never crashes or fabricates", () => {
+  it("malformed .cds degrades to a marked unavailable state, never crashes or fabricates", async () => {
     const cpaDir = join(tempDir, "cpa-malformed");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -731,7 +731,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir });
+    const result = await readCodexPool({ cpaDir });
     expect(result.kind).toBe("malformed");
     if (result.kind === "malformed") {
       expect(result.failure.provider).toBe("codex");
@@ -751,7 +751,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const mixedResult = readCodexPool({ cpaDir });
+    const mixedResult = await readCodexPool({ cpaDir });
     expect(mixedResult.kind).toBe("success");
     if (mixedResult.kind !== "success") return;
 
@@ -766,7 +766,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(healthyAccount?.status).toBe("active");
   });
 
-  it("all-cooling CPA pool marks state unavailable with earliest recovery headline", () => {
+  it("all-cooling CPA pool marks state unavailable with earliest recovery headline", async () => {
     const cpaDir = join(tempDir, "cpa-all-cooling");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -806,7 +806,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir, nowMs });
+    const result = await readCodexPool({ cpaDir, nowMs });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -821,7 +821,7 @@ describe("Codex CPA pool aggregation", () => {
     ).toBe(true);
   });
 
-  it("never parses, retains, logs, or renders credential fields from CPA .cds files", () => {
+  it("never parses, retains, logs, or renders credential fields from CPA .cds files", async () => {
     const cpaDir = join(tempDir, "cpa-poison");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -840,7 +840,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir });
+    const result = await readCodexPool({ cpaDir });
     expect(result.kind).toBe("success");
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain("POISON");
@@ -850,7 +850,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(serialized).not.toContain("access_token");
   });
 
-  it("ignores non-codex .cds files in CPA directory and falls back when no codex files exist", () => {
+  it("ignores non-codex .cds files in CPA directory and falls back when no codex files exist", async () => {
     const cpaDir = join(tempDir, "cpa-claude-only");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -882,7 +882,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({
+    const result = await readCodexPool({
       cpaDir,
       registryPath: fallbackRegistry,
       nowMs: 1_700_000_000 * 1000,
@@ -925,7 +925,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(poolSource?.path).toBe(cpaDir);
   });
 
-  it("all-cooling CPA pool without recovery timestamps emits cooling resetText, never pool serving", () => {
+  it("all-cooling CPA pool without recovery timestamps emits cooling resetText, never pool serving", async () => {
     const cpaDir = join(tempDir, "cpa-cooling-no-timestamp");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -949,7 +949,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir });
+    const result = await readCodexPool({ cpaDir });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -966,7 +966,7 @@ describe("Codex CPA pool aggregation", () => {
     }
   });
 
-  it("ignores stale root retry timestamp when root status is active and record is cooling", () => {
+  it("ignores stale root retry timestamp when root status is active and record is cooling", async () => {
     const cpaDir = join(tempDir, "cpa-stale-root-time");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -993,7 +993,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir });
+    const result = await readCodexPool({ cpaDir });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -1005,7 +1005,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(result.quota.windows[0].resetsAt).toBe(futureCoolingTime);
   });
 
-  it("does not heuristically guess plan or email from auth_id", () => {
+  it("does not heuristically guess plan or email from auth_id", async () => {
     const cpaDir = join(tempDir, "cpa-no-heuristics");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -1019,7 +1019,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir });
+    const result = await readCodexPool({ cpaDir });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -1037,7 +1037,7 @@ describe("Codex CPA pool aggregation", () => {
     );
   });
 
-  it("ignores .cds files with no provider property and no records, falling back to registry", () => {
+  it("ignores .cds files with no provider property and no records, falling back to registry", async () => {
     const cpaDir = join(tempDir, "cpa-no-provider");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -1066,7 +1066,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({
+    const result = await readCodexPool({
       cpaDir,
       registryPath: fallbackRegistry,
       nowMs: 1_700_000_000 * 1000,
@@ -1076,7 +1076,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(result.source).toBe("registry");
   });
 
-  it("all-cooling CPA pool with recovery timestamps surfaces earliest recovery headline and retryAfter", () => {
+  it("all-cooling CPA pool with recovery timestamps surfaces earliest recovery headline and retryAfter", async () => {
     const cpaDir = join(tempDir, "cpa-all-cooling-recovery");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -1136,7 +1136,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir, nowMs });
+    const result = await readCodexPool({ cpaDir, nowMs });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -1174,7 +1174,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(toon).not.toContain(`retry after ${tEarliest}`);
   });
 
-  it("expired cooldown records are treated as usable active accounts and do not count as cooling", () => {
+  it("expired cooldown records are treated as usable active accounts and do not count as cooling", async () => {
     const cpaDir = join(tempDir, "cpa-expired-cooldown");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -1235,7 +1235,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir, nowMs });
+    const result = await readCodexPool({ cpaDir, nowMs });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -1268,7 +1268,7 @@ describe("Codex CPA pool aggregation", () => {
     expect(acc3?.windows[0]?.resetsAt).toBe(futureCooling);
   });
 
-  it("genuinely-exhausted pool without recovery timestamps reports unavailable without retryAfter", () => {
+  it("genuinely-exhausted pool without recovery timestamps reports unavailable without retryAfter", async () => {
     const cpaDir = join(tempDir, "cpa-genuinely-exhausted");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -1298,7 +1298,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir });
+    const result = await readCodexPool({ cpaDir });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -1317,7 +1317,7 @@ describe("Codex CPA pool aggregation", () => {
     }
   });
 
-  it("cooling records with empty or null reason do not auto-mark active", () => {
+  it("cooling records with empty or null reason do not auto-mark active", async () => {
     const cpaDir = join(tempDir, "cpa-empty-reason-cooling");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -1356,7 +1356,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir, nowMs });
+    const result = await readCodexPool({ cpaDir, nowMs });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -1367,7 +1367,7 @@ describe("Codex CPA pool aggregation", () => {
     ).toBe(true);
   });
 
-  it("top-level cooling status does not override child records with expired cooldown timestamps", () => {
+  it("top-level cooling status does not override child records with expired cooldown timestamps", async () => {
     const cpaDir = join(tempDir, "cpa-root-cooling-expired-child");
     mkdirSync(cpaDir, { recursive: true });
 
@@ -1391,7 +1391,7 @@ describe("Codex CPA pool aggregation", () => {
       "utf8",
     );
 
-    const result = readCodexPool({ cpaDir, nowMs });
+    const result = await readCodexPool({ cpaDir, nowMs });
     expect(result.kind).toBe("success");
     if (result.kind !== "success") return;
 
@@ -1401,5 +1401,407 @@ describe("Codex CPA pool aggregation", () => {
     );
     expect(acc?.status).toBe("active");
     expect(acc?.nextRetryAfter).toBeUndefined();
+  });
+
+  it("fixture .cds with future cooling + fake probe succeeds -> credential reported with real window, not unavailable", async () => {
+    const cpaDir = join(tempDir, "cpa-probe-success");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const nowMs = 1_770_000_000_000;
+    const futureCooling = new Date(nowMs + 86400 * 1000).toISOString();
+
+    writeFileSync(
+      join(cpaDir, "codex-cooling-acc.cds"),
+      JSON.stringify({
+        auth_id: "codex-cooling-acc.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            next_retry_after: futureCooling,
+            quota: { exceeded: true, next_recover_at: futureCooling },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const probeCalls: unknown[] = [];
+    const result = await readCodexPool({
+      cpaDir,
+      nowMs,
+      probe: async (context) => {
+        probeCalls.push(context);
+        return {
+          status: "success",
+          plan: "team",
+          account: { email: "probed-user@example.com" },
+          windows: [
+            {
+              id: "five_hour",
+              label: "session",
+              kind: "session",
+              percentUsed: 20,
+              percentRemaining: 80,
+            },
+            {
+              id: "weekly",
+              label: "week",
+              kind: "weekly",
+              percentUsed: 10,
+              percentRemaining: 90,
+            },
+          ],
+        };
+      },
+    });
+
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(probeCalls).toHaveLength(1);
+    expect(result.quota.state.status).toBe("fresh");
+    expect(result.quota.state.stale).toBe(false);
+
+    const poolAccounts = result.quota.pool?.accounts;
+    expect(poolAccounts).toHaveLength(1);
+    const acc = poolAccounts![0];
+    expect(acc.status).toBe("active");
+    expect(acc.recovered).toBe(true);
+    expect(acc.stale).toBeUndefined();
+    expect(acc.nextRetryAfter).toBeUndefined();
+    expect(acc.nextRecoverAt).toBeUndefined();
+    expect(acc.plan).toBe("team");
+    expect(acc.email).toBe("probed-user@example.com");
+    expect(
+      acc.windows.find((w) => w.id === "five_hour")?.percentRemaining,
+    ).toBe(80);
+
+    // Headline windows updated with real probed windows
+    expect(
+      result.quota.windows.find((w) => w.id === "five_hour")?.percentRemaining,
+    ).toBe(80);
+
+    // Attempts record both pool check and cli-rpc probe
+    const poolAttempt = result.quota.attempts?.find(
+      (a) => a.source === "pool:codex-cooling-acc.json",
+    );
+    expect(poolAttempt?.status).toBe("success");
+    const rpcAttempt = result.quota.attempts?.find(
+      (a) => a.source === "cli-rpc:codex-cooling-acc.json",
+    );
+    expect(rpcAttempt?.status).toBe("success");
+  });
+
+  it("fixture .cds with future cooling + fake probe fails -> cooling verdict stands with unverified note", async () => {
+    const cpaDir = join(tempDir, "cpa-probe-failed");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const nowMs = 1_770_000_000_000;
+    const futureCooling = new Date(nowMs + 86400 * 1000).toISOString();
+
+    writeFileSync(
+      join(cpaDir, "codex-cooling-fail.cds"),
+      JSON.stringify({
+        auth_id: "codex-cooling-fail.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            next_retry_after: futureCooling,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({
+      cpaDir,
+      nowMs,
+      probe: async () => ({
+        status: "failed",
+        error: "network_error",
+      }),
+    });
+
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.stale).toBe(false);
+    expect(result.quota.state.cooldownUnverified).toBe(true);
+    expect(result.quota.state.unverified).toBe(true);
+
+    const acc = result.quota.pool?.accounts[0];
+    expect(acc?.status).toBe("cooling");
+    expect(acc?.unverified).toBe(true);
+    expect(acc?.cooldownUnverified).toBe(true);
+    expect(acc?.note).toBe("cooldown unverified");
+    expect(acc?.stale).toBe(true);
+
+    const rpcAttempt = result.quota.attempts?.find(
+      (a) => a.source === "cli-rpc:codex-cooling-fail.json",
+    );
+    expect(rpcAttempt?.status).toBe("failed");
+    expect(rpcAttempt?.error).toBe("network_error");
+  });
+
+  it("fixture .cds with future cooling + probe succeeds with exhausted session window -> cooldown verified with vendor windows, not active and not unverified", async () => {
+    const cpaDir = join(tempDir, "cpa-probe-exhausted");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const nowMs = 1_770_000_000_000;
+    const sessionReset = new Date(nowMs + 3600 * 1000).toISOString();
+    const weeklyReset = new Date(nowMs + 86400 * 1000).toISOString();
+
+    writeFileSync(
+      join(cpaDir, "codex-cooling-exhausted.cds"),
+      JSON.stringify({
+        auth_id: "codex-cooling-exhausted.json",
+        provider: "codex",
+        updated_at: "2026-10-01T00:00:00Z",
+        records: [
+          {
+            status: "cooling",
+            next_retry_after: sessionReset,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({
+      cpaDir,
+      nowMs,
+      probe: async () => ({
+        status: "success",
+        plan: "team",
+        account: { email: "exhausted-user@example.com" },
+        windows: [
+          {
+            id: "five_hour",
+            label: "session",
+            kind: "session",
+            percentUsed: 100,
+            percentRemaining: 0,
+            resetsAt: sessionReset,
+          },
+          {
+            id: "weekly",
+            label: "week",
+            kind: "weekly",
+            percentUsed: 100,
+            percentRemaining: 0,
+            resetsAt: weeklyReset,
+          },
+        ],
+      }),
+    });
+
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.stale).toBe(false);
+    expect(result.quota.state.retryAfter).toBe(weeklyReset);
+    expect(result.quota.state.refreshedAt).not.toBe("2026-10-01T00:00:00Z");
+    expect(result.quota.state.cooldownUnverified).toBeUndefined();
+    expect(result.quota.state.unverified).toBeUndefined();
+
+    const poolAccounts = result.quota.pool?.accounts;
+    expect(poolAccounts).toHaveLength(1);
+    const acc = poolAccounts![0];
+    expect(acc.status).toBe("cooling");
+    expect(acc.recovered).toBeUndefined();
+    expect(acc.unverified).toBeUndefined();
+    expect(acc.cooldownUnverified).toBeUndefined();
+    expect(acc.note).toBeUndefined();
+    expect(acc.nextRetryAfter).toBe(weeklyReset);
+    expect(acc.nextRecoverAt).toBe(weeklyReset);
+    expect(
+      acc.windows.find((w) => w.id === "five_hour")?.percentRemaining,
+    ).toBe(0);
+    expect(
+      result.quota.windows.find((w) => w.id === "five_hour")?.percentRemaining,
+    ).toBe(0);
+
+    const rpcAttempt = result.quota.attempts?.find(
+      (a) => a.source === "cli-rpc:codex-cooling-exhausted.json",
+    );
+    expect(rpcAttempt?.status).toBe("success");
+  });
+
+  it("fixture .cds with future cooling + probe throws error -> cooldown preserved as unverified without crashing", async () => {
+    const cpaDir = join(tempDir, "cpa-probe-throws");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const nowMs = 1_770_000_000_000;
+    const futureCooling = new Date(nowMs + 86400 * 1000).toISOString();
+
+    writeFileSync(
+      join(cpaDir, "codex-cooling-throws.cds"),
+      JSON.stringify({
+        auth_id: "codex-cooling-throws.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            next_retry_after: futureCooling,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({
+      cpaDir,
+      nowMs,
+      probe: async () => {
+        throw new Error("unexpected spawn failure");
+      },
+    });
+
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.cooldownUnverified).toBe(true);
+    expect(result.quota.state.unverified).toBe(true);
+
+    const acc = result.quota.pool?.accounts[0];
+    expect(acc?.status).toBe("cooling");
+    expect(acc?.unverified).toBe(true);
+    expect(acc?.cooldownUnverified).toBe(true);
+    expect(acc?.note).toBe("cooldown unverified");
+
+    const rpcAttempt = result.quota.attempts?.find(
+      (a) => a.source === "cli-rpc:codex-cooling-throws.json",
+    );
+    expect(rpcAttempt?.status).toBe("failed");
+    expect(rpcAttempt?.error).toBe("unexpected spawn failure");
+  });
+
+  it("fixture .cds with future cooling + probe cannot run -> cooling verdict stands with unverified note", async () => {
+    const cpaDir = join(tempDir, "cpa-probe-cannot-run");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const nowMs = 1_770_000_000_000;
+    const futureCooling = new Date(nowMs + 86400 * 1000).toISOString();
+
+    writeFileSync(
+      join(cpaDir, "codex-cooling-unverified.cds"),
+      JSON.stringify({
+        auth_id: "codex-cooling-unverified.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            next_retry_after: futureCooling,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({
+      cpaDir,
+      nowMs,
+    });
+
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.stale).toBe(false);
+    expect(result.quota.state.cooldownUnverified).toBe(true);
+    expect(result.quota.state.unverified).toBe(true);
+
+    const acc = result.quota.pool?.accounts[0];
+    expect(acc?.status).toBe("cooling");
+    expect(acc?.unverified).toBe(true);
+    expect(acc?.stale).toBe(true);
+    expect(acc?.note).toBe("cooldown unverified");
+
+    const rpcAttempt = result.quota.attempts?.find(
+      (a) => a.source === "cli-rpc:codex-cooling-unverified.json",
+    );
+    expect(rpcAttempt?.status).toBe("skipped");
+    expect(rpcAttempt?.error).toBe("unverified");
+  });
+
+  it("integrates fake probe with createCodexAdapter and fetchQuota", async () => {
+    const cpaDir = join(tempDir, "cpa-adapter-integration");
+    mkdirSync(cpaDir, { recursive: true });
+    process.env.CPA_DIR = cpaDir;
+
+    const futureCooling = new Date(Date.now() + 86400 * 1000).toISOString();
+    writeFileSync(
+      join(cpaDir, "codex-cooling-probe.cds"),
+      JSON.stringify({
+        auth_id: "codex-cooling-probe.json",
+        provider: "codex",
+        records: [
+          {
+            status: "cooling",
+            next_retry_after: futureCooling,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const adapter = createCodexAdapter({
+      codexPoolProbe: async () => ({
+        status: "success",
+        plan: "pro",
+        account: { email: "adapter-probed@example.com" },
+        windows: [
+          {
+            id: "five_hour",
+            label: "session",
+            kind: "session",
+            percentUsed: 15,
+            percentRemaining: 85,
+          },
+        ],
+      }),
+    });
+
+    const quota = await adapter.fetchQuota(OPTIONS);
+    expect(quota.provider).toBe("codex");
+    expect(quota.state.status).toBe("fresh");
+    expect(
+      quota.windows.find((w) => w.id === "five_hour")?.percentRemaining,
+    ).toBe(85);
+    expect(quota.pool?.accounts[0].recovered).toBe(true);
+  });
+
+  it("no-CPA environment leaves provider unaffected", async () => {
+    const emptyCpa = join(tempDir, "empty-nonexistent-cpa");
+    process.env.CPA_DIR = emptyCpa;
+
+    const fixture = {
+      accounts: [
+        {
+          account_key: "acc-reg",
+          email: "registry-user@example.com",
+          plan: "team",
+          last_used_at: Math.floor(Date.now() / 1000),
+          last_usage: {
+            primary: { used_percent: 10 },
+          },
+        },
+      ],
+    };
+    writeFileSync(registryFile, JSON.stringify(fixture), "utf8");
+
+    const result = await readCodexPool({
+      cpaDir: emptyCpa,
+      registryPath: registryFile,
+    });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+    expect(result.source).toBe("registry");
+    expect(result.quota.pool?.accounts[0].accountKey).toBe("acc-reg");
   });
 });

@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { spawn } from "node:child_process";
 import {
   retireCodexAccount,
@@ -10,14 +10,9 @@ import {
 } from "../cache.js";
 import { readJsonFileResult, type JsonFileReadResult } from "../lib/fs.js";
 import { providerFetch } from "../lib/http.js";
-import { findCommandPath, terminateChild } from "../lib/process.js";
+import { terminateChild } from "../lib/process.js";
 import { redactSecret } from "../lib/secret.js";
-import {
-  clampPercent,
-  nowIso,
-  parseEpochOrIso,
-  retryAfterToIso,
-} from "../lib/time.js";
+import { retryAfterToIso } from "../lib/time.js";
 import type {
   AuthProviderReport,
   AuthSourceReport,
@@ -34,7 +29,6 @@ import {
   staleUnlessSignOut,
   statusFromError,
   successProvider,
-  withRemaining,
 } from "./common.js";
 import {
   selectCredential,
@@ -50,7 +44,22 @@ import {
   type PiCodexCredentialInspection,
   type PiCodexCredentialResolution,
 } from "./pi-codex-credential.js";
-import { readCodexPool, resolveCodexRegistryPath } from "./codex-pool.js";
+import {
+  readCodexPool,
+  resolveCodexRegistryPath,
+  type CodexPoolProbe,
+} from "./codex-pool.js";
+import {
+  mergeAccountAndLimits,
+  normalizeCodexUsage,
+} from "./codex-normalize.js";
+import {
+  codexBinaryErrorMessage,
+  resolveCodexBinary,
+  sendRpc,
+} from "./codex-probe.js";
+
+export { mergeAccountAndLimits, normalizeCodexUsage };
 
 const ENDPOINTS = [
   "https://chatgpt.com/backend-api/wham/usage",
@@ -59,14 +68,9 @@ const ENDPOINTS = [
 const API_TIMEOUT_MS = 15_000;
 const CLI_TIMEOUT_MS = 15_000;
 const RPC_TIMEOUT_MS = 8_000;
-const CODEX_BINARY_ENV = "QUOTA_AXI_CODEX_BINARY";
 const PI_CODEX_CREDENTIAL_SOURCE = piCodexSource(PI_CODEX_BUILTIN_ID);
 const CODEX_SIGN_IN_REQUIRED = "Codex sign-in required";
 const CODEX_ACCESS_TOKEN_EXPIRED = "Codex access token expired";
-
-type CodexBinaryState =
-  | { status: "available"; path: string }
-  | { status: "missing"; path?: string; error?: string };
 
 type CodexCredentials = {
   accessToken: string;
@@ -112,18 +116,9 @@ type NormalizedCodexQuota = {
   refreshedAt: string;
 };
 
-type RawWindow = {
-  used_percent?: unknown;
-  usedPercent?: unknown;
-  reset_at?: unknown;
-  resetsAt?: unknown;
-  reset_after_seconds?: unknown;
-  limit_window_seconds?: unknown;
-  windowDurationMins?: unknown;
-};
-
-type CodexDependencies = {
+export type CodexDependencies = {
   piCodexBroker: PiCodexCredentialBroker;
+  codexPoolProbe?: CodexPoolProbe;
 };
 
 const defaultCodexDependencies: CodexDependencies = {
@@ -177,7 +172,10 @@ async function fetchSingleWinnerQuota(
 ): Promise<ProviderQuota> {
   if (isProfileOnly(options))
     return fetchQuotaWithDependencies(dependencies, options);
-  const pool = readCodexPool();
+  const pool = await readCodexPool({
+    probe: dependencies.codexPoolProbe,
+    environment: process.env,
+  });
   if (pool.kind === "success") {
     return pool.quota;
   }
@@ -242,7 +240,10 @@ type CodexAccountContext =
 async function discoverCodexAccounts(
   dependencies: CodexDependencies,
 ): Promise<ProviderAccount[] | undefined> {
-  const pool = readCodexPool();
+  const pool = await readCodexPool({
+    skipProbe: true,
+    environment: process.env,
+  });
   if (pool.kind !== "missing") {
     return undefined;
   }
@@ -1016,7 +1017,10 @@ async function inspectAuthWithDependencies(
   const authFile = codexAuthFile();
   const credentialState = readCredentialState(authFile);
   const sources: AuthSourceReport[] = [];
-  const pool = readCodexPool();
+  const pool = await readCodexPool({
+    skipProbe: true,
+    environment: process.env,
+  });
   if (pool.kind !== "missing") {
     sources.push({
       source: pool.source === "cpa" ? "cpa" : "pool-registry",
@@ -1106,222 +1110,6 @@ function piInspectionSource(
     path: inspection.path,
     status,
     ...(inspection.error ? { error: inspection.error } : {}),
-  };
-}
-
-export function normalizeCodexUsage(raw: unknown):
-  | {
-      plan?: string;
-      account?: ProviderQuota["account"];
-      windows: QuotaWindow[];
-      credits?: ProviderQuota["credits"];
-      refreshedAt: string;
-    }
-  | undefined {
-  // Both the direct ChatGPT backend calls and the codex app-server RPC
-  // describe the same rate-limit concepts, but the RPC surface uses
-  // camelCase field names while the HTTP backend uses snake_case; both
-  // forms are tolerated wherever they appear below.
-  if (!raw || typeof raw !== "object") return undefined;
-  const data = raw as Record<string, unknown>;
-  const rateLimit = resolveRateLimitContainer(data);
-
-  const windows = deduplicateWindowIds([
-    ...windowPairFromContainer(
-      rateLimit,
-      "five_hour",
-      "session",
-      "session",
-      "weekly",
-      "week",
-      "weekly",
-    ),
-    ...windowPairFromContainer(
-      objectValue(data.code_review_rate_limit),
-      "code_review_five_hour",
-      "code review session",
-      "session",
-      "code_review_weekly",
-      "code review week",
-      "weekly",
-    ),
-    ...collectNamedRateLimitWindows(data),
-  ]);
-
-  if (windows.length === 0) return undefined;
-
-  return {
-    plan: stringValue(data.plan_type) ?? stringValue(data.planType),
-    account: {
-      email: stringValue(data.email),
-      accountId: stringValue(data.account_id) ?? stringValue(data.accountId),
-    },
-    windows,
-    credits: normalizeCredits(data.credits ?? rateLimit?.credits),
-    refreshedAt: nowIso(),
-  };
-}
-
-function resolveRateLimitContainer(
-  data: Record<string, unknown>,
-): Record<string, unknown> | undefined {
-  return (
-    objectValue(data.rate_limit) ??
-    objectValue(data.rateLimits) ??
-    objectValue(data.rate_limits) ??
-    data
-  );
-}
-
-type WindowIdentity = Pick<QuotaWindow, "id" | "label" | "kind">;
-
-type WindowIdentitySet = {
-  session: WindowIdentity;
-  weekly: WindowIdentity;
-  unfamiliar(windowSeconds: number): WindowIdentity;
-};
-
-function windowPairFromContainer(
-  container: Record<string, unknown> | undefined,
-  primaryId: string,
-  primaryLabel: string,
-  primaryKind: QuotaWindow["kind"],
-  secondaryId: string,
-  secondaryLabel: string,
-  secondaryKind: QuotaWindow["kind"],
-): QuotaWindow[] {
-  if (!container) return [];
-  const identities: WindowIdentitySet = {
-    session: { id: primaryId, label: primaryLabel, kind: primaryKind },
-    weekly: { id: secondaryId, label: secondaryLabel, kind: secondaryKind },
-    unfamiliar(windowSeconds) {
-      const duration = readableWindowDuration(windowSeconds);
-      const prefix =
-        primaryId === "five_hour" ? "window" : "code_review_window";
-      return {
-        id: `${prefix}:${duration}`,
-        label: `${duration} window`,
-        kind: "unknown",
-      };
-    },
-  };
-  return [
-    normalizeWindow(
-      container.primary_window ?? container.primary,
-      identities.session,
-      identities,
-    ),
-    normalizeWindow(
-      container.secondary_window ?? container.secondary,
-      identities.weekly,
-      identities,
-    ),
-  ].filter((window): window is QuotaWindow => Boolean(window));
-}
-
-// Beyond the base rate limit, both API shapes can carry extra limits scoped
-// to a specific model or feature (e.g. a preview model with its own budget):
-// the HTTP backend lists them under `additional_rate_limits`, keyed by
-// `metered_feature`/`limit_name`; the app-server RPC exposes an equivalent
-// `rateLimitsByLimitId` map keyed by limit id, where only the named entries
-// are extras (the unnamed one duplicates the base limit already parsed above).
-function collectNamedRateLimitWindows(
-  data: Record<string, unknown>,
-): QuotaWindow[] {
-  const windows: QuotaWindow[] = [];
-
-  const additional = Array.isArray(data.additional_rate_limits)
-    ? data.additional_rate_limits
-    : [];
-  for (const entry of additional) {
-    const item = objectValue(entry);
-    if (!item) continue;
-    const id =
-      stringValue(item.metered_feature) ?? stringValue(item.limit_name);
-    const label = stringValue(item.limit_name) ?? id;
-    const container = objectValue(item.rate_limit);
-    if (!id || !label || !container) continue;
-    windows.push(...namedLimitWindows(id, label, container));
-  }
-
-  const byLimitId = objectValue(data.rateLimitsByLimitId);
-  if (byLimitId) {
-    for (const [limitId, value] of Object.entries(byLimitId)) {
-      const item = objectValue(value);
-      if (!item) continue;
-      const label = stringValue(item.limitName) ?? stringValue(item.limit_name);
-      if (!label) continue;
-      windows.push(...namedLimitWindows(limitId, label, item));
-    }
-  }
-
-  return windows;
-}
-
-function namedLimitWindows(
-  id: string,
-  label: string,
-  container: Record<string, unknown>,
-): QuotaWindow[] {
-  const identities: WindowIdentitySet = {
-    session: {
-      id: `model:${id}:5h`,
-      label: `${label} session`,
-      kind: "model",
-    },
-    weekly: {
-      id: `model:${id}:7d`,
-      label: `${label} week`,
-      kind: "model",
-    },
-    unfamiliar(windowSeconds) {
-      const duration = readableWindowDuration(windowSeconds);
-      return {
-        id: `model:${id}:window:${duration}`,
-        label: `${label} ${duration} window`,
-        kind: "model",
-      };
-    },
-  };
-  return [
-    normalizeWindow(
-      container.primary_window ?? container.primary,
-      identities.session,
-      identities,
-    ),
-    normalizeWindow(
-      container.secondary_window ?? container.secondary,
-      identities.weekly,
-      identities,
-    ),
-  ].filter((window): window is QuotaWindow => Boolean(window));
-}
-
-function deduplicateWindowIds(windows: QuotaWindow[]): QuotaWindow[] {
-  const counts = new Map<string, number>();
-  return windows.map((window) => {
-    const count = (counts.get(window.id) ?? 0) + 1;
-    counts.set(window.id, count);
-    return count === 1 ? window : { ...window, id: `${window.id}_${count}` };
-  });
-}
-
-export function mergeAccountAndLimits(
-  account: unknown,
-  limits: unknown,
-): Record<string, unknown> {
-  const accountData = objectValue(account) ?? {};
-  const accountRecord = objectValue(accountData.account) ?? accountData;
-  const limitData = objectValue(limits) ?? {};
-  return {
-    ...limitData,
-    email: accountRecord.email ?? limitData.email,
-    account_id:
-      accountRecord.account_id ??
-      accountRecord.accountId ??
-      limitData.account_id,
-    plan_type:
-      accountRecord.plan_type ?? accountRecord.planType ?? limitData.plan_type,
   };
 }
 
@@ -1694,117 +1482,6 @@ async function probeCodexCli(): Promise<{
   } finally {
     terminateChild(child);
   }
-}
-
-async function resolveCodexBinary(): Promise<CodexBinaryState> {
-  const configured = process.env[CODEX_BINARY_ENV];
-  if (configured !== undefined) {
-    const path = configured.trim();
-    if (!path || !isAbsolute(path)) {
-      return {
-        status: "missing",
-        error: "codex_binary_override_not_absolute",
-      };
-    }
-    const executable = await findCommandPath(path);
-    if (!executable) {
-      return {
-        status: "missing",
-        path,
-        error: "codex_binary_override_not_executable",
-      };
-    }
-    return { status: "available", path: executable };
-  }
-
-  const executable = await findCommandPath("codex");
-  return executable
-    ? { status: "available", path: executable }
-    : { status: "missing" };
-}
-
-function codexBinaryErrorMessage(
-  binary: Extract<CodexBinaryState, { status: "missing" }>,
-): string {
-  if (binary.error === "codex_binary_override_not_absolute") {
-    return "Configured Codex binary must be an absolute executable path";
-  }
-  if (binary.error === "codex_binary_override_not_executable") {
-    return "Configured Codex binary is not executable";
-  }
-  return "Codex quota unavailable";
-}
-
-function sendRpc(
-  child: { stdin: { writable: boolean; write: (chunk: string) => unknown } },
-  id: number,
-  method: string,
-  params: unknown = {},
-) {
-  if (!child.stdin.writable) return;
-  child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
-}
-
-function normalizeWindow(
-  raw: unknown,
-  fallbackIdentity: WindowIdentity,
-  identities: WindowIdentitySet,
-): QuotaWindow | undefined {
-  const data = objectValue(raw) as RawWindow | undefined;
-  if (!data) return undefined;
-  const used = numberValue(data.used_percent) ?? numberValue(data.usedPercent);
-  if (used === undefined) return undefined;
-  const windowSeconds =
-    numberValue(data.limit_window_seconds) ??
-    (numberValue(data.windowDurationMins) === undefined
-      ? undefined
-      : numberValue(data.windowDurationMins)! * 60);
-  const resetFromSeconds =
-    numberValue(data.reset_after_seconds) === undefined
-      ? undefined
-      : new Date(
-          Date.now() + numberValue(data.reset_after_seconds)! * 1000,
-        ).toISOString();
-  const identity = windowIdentity(windowSeconds, fallbackIdentity, identities);
-  return withRemaining({
-    ...identity,
-    percentUsed: clampPercent(used),
-    resetsAt:
-      parseEpochOrIso(data.reset_at) ??
-      parseEpochOrIso(data.resetsAt) ??
-      resetFromSeconds,
-    windowSeconds,
-  });
-}
-
-function windowIdentity(
-  windowSeconds: number | undefined,
-  fallbackIdentity: WindowIdentity,
-  identities: WindowIdentitySet,
-): WindowIdentity {
-  if (windowSeconds === undefined) return fallbackIdentity;
-  if (windowSeconds === 18_000) return identities.session;
-  if (windowSeconds === 604_800) return identities.weekly;
-  return identities.unfamiliar(windowSeconds);
-}
-
-function readableWindowDuration(windowSeconds: number): string {
-  const hours = windowSeconds / 3600;
-  return `${Number.isInteger(hours) ? hours : Number(hours.toFixed(2))}h`;
-}
-
-function normalizeCredits(raw: unknown): ProviderQuota["credits"] | undefined {
-  const data = objectValue(raw);
-  if (!data) return undefined;
-  const balance = numberValue(data.balance);
-  const unlimited =
-    typeof data.unlimited === "boolean" ? data.unlimited : undefined;
-  if (balance === undefined && unlimited === undefined) return undefined;
-  return {
-    remaining: balance,
-    unlimited,
-    unit: "credits",
-  };
 }
 
 function decodeJwtPayload(
