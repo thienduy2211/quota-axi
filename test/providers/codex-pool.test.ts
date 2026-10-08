@@ -1776,6 +1776,246 @@ describe("Codex CPA pool aggregation", () => {
     expect(quota.pool?.accounts[0].recovered).toBe(true);
   });
 
+  it("compact report classifies per-account cooldown reasons and never renders Go zero timestamps", async () => {
+    const cpaDir = join(tempDir, "cpa-cooldown-reasons");
+    mkdirSync(cpaDir, { recursive: true });
+
+    // Reconstructs the 2026-10-08 fleet misread: real credential_quota deaths
+    // beside a sub-minute server_is_overloaded blip, all once shown alike.
+    const nowMs = Date.parse("2026-10-08T07:33:00.000Z");
+    const transientRetry = "2026-10-08T07:34:21.954Z";
+    const teamRecover1 = "2026-10-08T11:00:00.000Z";
+    const teamRecover2 = "2026-10-08T12:30:00.000Z";
+
+    const overloadReason = JSON.stringify({
+      error: {
+        type: "service_unavailable_error",
+        code: "server_is_overloaded",
+        headers: { "x-retry-metadata": "NO_MORE_RETRY" },
+        message:
+          "Our servers are currently overloaded. Please try again later.",
+        param: null,
+      },
+      sequence_number: 2,
+    });
+
+    writeFileSync(
+      join(cpaDir, "codex-main.cds"),
+      JSON.stringify({
+        version: 1,
+        auth_id: "codex-main.json",
+        provider: "codex",
+        updated_at: "2026-10-08T07:33:21.955135167Z",
+        records: [
+          {
+            provider: "codex",
+            auth_id: "codex-main.json",
+            status: "cooling",
+            next_retry_after: transientRetry,
+            reason: overloadReason,
+            quota: {
+              exceeded: false,
+              next_recover_at: "0001-01-01T00:00:00Z",
+              observed_at: "0001-01-01T00:00:00Z",
+            },
+            last_error: {
+              message: overloadReason,
+              retryable: false,
+              http_status: 502,
+            },
+            updated_at: "2026-10-08T07:33:21.954613647Z",
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const quotaReason = JSON.stringify({
+      error: {
+        type: "insufficient_quota",
+        code: "credential_quota",
+        message: "Credential quota exceeded.",
+        param: null,
+      },
+      sequence_number: 5,
+    });
+
+    for (const [file, authId, recoverAt] of [
+      ["codex-team-1.cds", "codex-team-1.json", teamRecover1],
+      ["codex-team-2.cds", "codex-team-2.json", teamRecover2],
+    ] as const) {
+      writeFileSync(
+        join(cpaDir, file),
+        JSON.stringify({
+          version: 1,
+          auth_id: authId,
+          provider: "codex",
+          records: [
+            {
+              provider: "codex",
+              auth_id: authId,
+              status: "cooling",
+              // CPA leaves next_retry_after as the Go zero time when a quota
+              // death has no scheduled retry; recovery falls back to
+              // quota.next_recover_at.
+              next_retry_after: "0001-01-01T00:00:00Z",
+              reason: quotaReason,
+              quota: { exceeded: true, next_recover_at: recoverAt },
+            },
+          ],
+        }),
+        "utf8",
+      );
+    }
+
+    const result = await readCodexPool({ cpaDir, nowMs });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    // All cooling stays unavailable, but the headline names the earliest
+    // genuine retry: the 60-second transient, not a fake epoch.
+    expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.retryAfter).toBe(transientRetry);
+
+    const main = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-main.json",
+    );
+    expect(main?.status).toBe("cooling");
+    expect(main?.cooldownReason).toBe("transient");
+    expect(main?.nextRetryAfter).toBe(transientRetry);
+
+    const team1 = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-team-1.json",
+    );
+    expect(team1?.status).toBe("cooling");
+    expect(team1?.cooldownReason).toBe("quota");
+    // next_retry_after was an unset sentinel, so the recover time is used.
+    expect(team1?.nextRetryAfter).toBe(teamRecover1);
+    expect(team1?.nextRecoverAt).toBe(teamRecover1);
+
+    const team2 = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-team-2.json",
+    );
+    expect(team2?.cooldownReason).toBe("quota");
+    expect(team2?.nextRetryAfter).toBe(teamRecover2);
+
+    const toon = renderQuotaToon(
+      {
+        generatedAt: new Date(nowMs).toISOString(),
+        schemaVersion: 6,
+        providers: [result.quota],
+      },
+      "quota-axi",
+      false,
+    );
+    expect(toon).toContain("cooldown");
+    expect(toon).toContain("codex-main.json transient");
+    expect(toon).toContain(`retry ${transientRetry}`);
+    expect(toon).toContain("codex-team-1.json quota");
+    expect(toon).toContain("codex-team-2.json quota");
+    expect(toon).not.toContain("0001-01-01");
+  });
+
+  it("cooling record with only zero timestamps stays cooling with unknown reason and retry", async () => {
+    const cpaDir = join(tempDir, "cpa-zero-timestamps");
+    mkdirSync(cpaDir, { recursive: true });
+    const nowMs = Date.parse("2026-10-08T07:33:00.000Z");
+
+    writeFileSync(
+      join(cpaDir, "codex-zero.cds"),
+      JSON.stringify({
+        version: 1,
+        auth_id: "codex-zero.json",
+        provider: "codex",
+        records: [
+          {
+            provider: "codex",
+            auth_id: "codex-zero.json",
+            status: "cooling",
+            next_retry_after: "0001-01-01T00:00:00Z",
+            quota: {
+              exceeded: false,
+              next_recover_at: "0001-01-01T00:00:00Z",
+            },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({ cpaDir, nowMs });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    // A zero timestamp is an unset field, not an expired deadline: the
+    // cooldown stands with an honest unknown retry instead of flipping
+    // active or printing a fake epoch.
+    const acc = result.quota.pool?.accounts[0];
+    expect(acc?.status).toBe("cooling");
+    expect(acc?.cooldownReason).toBe("unknown");
+    expect(acc?.nextRetryAfter).toBeUndefined();
+    expect(acc?.nextRecoverAt).toBeUndefined();
+    expect(acc?.windows[0]?.resetsAt).toBeUndefined();
+    expect(acc?.windows[0]?.resetText).toBe("cooling");
+
+    expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.retryAfter).toBeUndefined();
+    expect(result.quota.state.error).toBe("All pool accounts in cooldown");
+
+    const toon = renderQuotaToon(
+      {
+        generatedAt: new Date(nowMs).toISOString(),
+        schemaVersion: 6,
+        providers: [result.quota],
+      },
+      "quota-axi",
+      false,
+    );
+    expect(toon).toContain("codex-zero.json unknown");
+    expect(toon).toContain("retry unknown");
+    expect(toon).not.toContain("0001-01-01");
+  });
+
+  it("unavailable pool member surfaces its own compact attention row", async () => {
+    const cpaDir = join(tempDir, "cpa-member-unavailable");
+    mkdirSync(cpaDir, { recursive: true });
+    const nowMs = Date.parse("2026-10-08T07:33:00.000Z");
+
+    writeFileSync(join(cpaDir, "codex-corrupt.cds"), "NOT_JSON", "utf8");
+    writeFileSync(
+      join(cpaDir, "codex-ok.cds"),
+      JSON.stringify({
+        auth_id: "codex-ok.json",
+        provider: "codex",
+        status: "active",
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({ cpaDir, nowMs });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    const corrupt = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-corrupt",
+    );
+    expect(corrupt?.status).toBe("unavailable");
+    expect(corrupt?.note).toBe("json_parse_error");
+
+    const toon = renderQuotaToon(
+      {
+        generatedAt: new Date(nowMs).toISOString(),
+        schemaVersion: 6,
+        providers: [result.quota],
+      },
+      "quota-axi",
+      false,
+    );
+    expect(toon).toContain("codex-corrupt");
+    expect(toon).toContain("json_parse_error");
+    expect(toon).not.toContain("0001-01-01");
+  });
+
   it("no-CPA environment leaves provider unaffected", async () => {
     const emptyCpa = join(tempDir, "empty-nonexistent-cpa");
     process.env.CPA_DIR = emptyCpa;

@@ -9,6 +9,7 @@ import type {
   BoundConflict,
   EffectiveAvailability,
   ModelsResponse,
+  PoolAccountDetail,
   ProviderId,
   ProviderQuota,
   QuotaAxiResponse,
@@ -162,6 +163,7 @@ function quotaBlocks(response: QuotaAxiResponse): ProviderBlocks {
     );
     blocks.attention.push(...shareRows(provider));
     blocks.attention.push(...jobRows(provider));
+    blocks.attention.push(...poolAccountRows(provider));
     blocks.attention.push(...scopeAttention);
   }
   return blocks;
@@ -221,6 +223,59 @@ function providerAttention(
     ...providerStateRows(provider, measured, scopeRows),
     ...degradedSourceRows(provider),
   ];
+}
+
+/**
+ * Per-pool-member rows for cooling or unavailable accounts, so a short
+ * transient blip can never masquerade as quota death behind one aggregate
+ * status. Detail names the member, its reason class (`quota`, `transient`,
+ * or `unknown`), and when it is next retryable.
+ */
+function poolAccountRows(provider: ProviderQuota): AttentionRow[] {
+  const rows: AttentionRow[] = [];
+  for (const account of provider.pool?.accounts ?? []) {
+    const member = account.accountKey ?? account.email ?? UNKNOWN;
+    if (account.status === "cooling") {
+      const parts = [
+        `${member} ${account.cooldownReason ?? UNKNOWN}`,
+        `retry ${account.nextRetryAfter ?? UNKNOWN}`,
+      ];
+      if (account.unverified || account.cooldownUnverified) {
+        parts.push("unverified");
+      }
+      rows.push({
+        ...providerColumns(provider),
+        scope: "pool",
+        kind: "cooldown",
+        detail: parts.join(DETAIL_SEPARATOR),
+        remedy: NONE,
+      });
+    } else if (account.status === "unavailable") {
+      const retry = earliestCooldownIso(account);
+      const parts = [member];
+      if (account.note) parts.push(account.note);
+      parts.push(`retry ${retry ?? UNKNOWN}`);
+      rows.push({
+        ...providerColumns(provider),
+        scope: "pool",
+        kind: "unavailable",
+        detail: parts.join(DETAIL_SEPARATOR),
+        remedy: NONE,
+      });
+    }
+  }
+  return rows;
+}
+
+/** Earliest finite cooldown-until timestamp, as carried by `agy` pool members. */
+function earliestCooldownIso(account: PoolAccountDetail): string | undefined {
+  const times = Object.values(account.cooldowns ?? {}).filter(
+    (ms): ms is number =>
+      typeof ms === "number" && Number.isFinite(ms) && ms > 0,
+  );
+  return times.length > 0
+    ? new Date(Math.min(...times)).toISOString()
+    : undefined;
 }
 
 function shareRows(provider: ProviderQuota): AttentionRow[] {
@@ -623,7 +678,6 @@ export function redactedResponse(
       ...provider,
       account: undefined,
       attempts: undefined,
-      pool: undefined,
     })),
   };
 }
@@ -647,6 +701,10 @@ export function quotaJsonReport(
       ...provider,
       label: undefined,
       source: undefined,
+      // Pool member detail stays absent in minimal default `--json`; the
+      // compact TOON keeps it so per-account cooldown rows can name the
+      // member, its reason class, and its next retry time.
+      pool: undefined,
       windows: provider.windows.map(demotedWindow),
       ...(provider.quotaSemantics
         ? { quotaSemantics: demotedSemantics(provider.quotaSemantics) }
