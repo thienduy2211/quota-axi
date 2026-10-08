@@ -5,6 +5,7 @@ import { readJsonFileResult } from "../lib/fs.js";
 import { clampPercent, nowIso, parseEpochOrIso } from "../lib/time.js";
 import type {
   PoolAccountDetail,
+  PoolCooldownReason,
   ProviderQuota,
   ProviderStatus,
   QuotaWindow,
@@ -98,7 +99,131 @@ function parseTimestampMs(value: unknown): number | undefined {
   const iso = parseEpochOrIso(value);
   if (!iso) return undefined;
   const ms = Date.parse(iso);
-  return Number.isFinite(ms) ? ms : undefined;
+  // Cooldown timestamps at or before the epoch are unset sentinels (for
+  // example Go's zero time "0001-01-01T00:00:00Z"), never real deadlines.
+  return Number.isFinite(ms) && ms > 0 ? ms : undefined;
+}
+
+const TRANSIENT_COOLDOWN_TOKENS = new Set([
+  "server_is_overloaded",
+  "service_unavailable_error",
+  "service_unavailable",
+  "temporarily_unavailable",
+  "overloaded",
+  "overloaded_error",
+  "engine_overloaded",
+  "internal_error",
+  "internal_server_error",
+  "server_error",
+  "bad_gateway",
+  "gateway_timeout",
+  "timeout",
+  "deadline_exceeded",
+  "unavailable",
+  "rate_limit",
+  "rate_limit_error",
+  "rate_limit_exceeded",
+  "too_many_requests",
+]);
+
+const QUOTA_COOLDOWN_TOKENS = new Set([
+  "credential_quota",
+  "insufficient_quota",
+  "quota_exceeded",
+  "exceeded_current_quota",
+  "quota",
+  "billing_hard_limit_reached",
+  "billing",
+  "access_terminated",
+  "account_deactivated",
+  "invalid_api_key",
+  "authentication_error",
+  "unauthorized",
+  "permission_denied",
+  "permission_error",
+  "forbidden",
+  "token_expired",
+]);
+
+function collectCooldownTokens(source: unknown, tokens: string[]): void {
+  if (!source || typeof source !== "object") return;
+  const record = source as Record<string, unknown>;
+  const err =
+    record.error && typeof record.error === "object"
+      ? (record.error as Record<string, unknown>)
+      : undefined;
+  for (const candidate of [err?.type, err?.code, record.type, record.code]) {
+    if (typeof candidate === "string" && candidate.trim() !== "") {
+      tokens.push(candidate.trim().toLowerCase());
+    }
+  }
+}
+
+function cooldownReasonTokens(rec: Record<string, unknown>): string[] {
+  const tokens: string[] = [];
+  const collect = (value: unknown): void => {
+    if (value && typeof value === "object") {
+      collectCooldownTokens(value, tokens);
+      return;
+    }
+    if (typeof value !== "string") return;
+    const text = value.trim();
+    if (text === "") return;
+    if (!text.startsWith("{")) {
+      tokens.push(text.toLowerCase());
+      return;
+    }
+    try {
+      collectCooldownTokens(JSON.parse(text), tokens);
+    } catch {
+      tokens.push(text.toLowerCase());
+    }
+  };
+  collect(rec.reason);
+  collect(rec.last_error);
+  const lastError =
+    rec.last_error && typeof rec.last_error === "object"
+      ? (rec.last_error as Record<string, unknown>)
+      : undefined;
+  collect(lastError?.message);
+  return tokens;
+}
+
+function classifyCooldownRecord(
+  rec: Record<string, unknown>,
+): PoolCooldownReason {
+  const quota =
+    rec.quota && typeof rec.quota === "object"
+      ? (rec.quota as Record<string, unknown>)
+      : undefined;
+  if (quota?.exceeded === true) return "quota";
+  const tokens = cooldownReasonTokens(rec);
+  if (tokens.some((token) => QUOTA_COOLDOWN_TOKENS.has(token))) return "quota";
+  if (tokens.some((token) => TRANSIENT_COOLDOWN_TOKENS.has(token))) {
+    return "transient";
+  }
+  const lastError =
+    rec.last_error && typeof rec.last_error === "object"
+      ? (rec.last_error as Record<string, unknown>)
+      : undefined;
+  const httpStatus =
+    typeof lastError?.http_status === "number" &&
+    Number.isFinite(lastError.http_status)
+      ? lastError.http_status
+      : undefined;
+  if (httpStatus !== undefined) {
+    if (httpStatus === 429 || (httpStatus >= 500 && httpStatus < 600)) {
+      return "transient";
+    }
+    if (httpStatus === 401 || httpStatus === 403) {
+      return "quota";
+    }
+  }
+  return "unknown";
+}
+
+function cooldownReasonRank(reason: PoolCooldownReason): number {
+  return reason === "quota" ? 3 : reason === "unknown" ? 2 : 1;
 }
 
 function evaluateCooldownRecord(
@@ -178,6 +303,7 @@ type ParsedCpaAccount = {
   email?: string;
   plan?: string;
   cooling: boolean;
+  cooldownReason?: PoolCooldownReason;
   nextRetryAfter?: string;
   nextRecoverAt?: string;
   recoveryTime?: string;
@@ -269,9 +395,18 @@ function parseCpaFiles(
     );
 
     let isCooling = false;
-    const candidateRecoveryTimes: string[] = [];
-    let recordRetryAfter: string | undefined;
-    let recordRecoverAt: string | undefined;
+    let cooldownReason: PoolCooldownReason | undefined;
+    const retryCandidates: string[] = [];
+    const recoverCandidates: string[] = [];
+
+    const escalateReason = (reason: PoolCooldownReason): void => {
+      if (
+        cooldownReason === undefined ||
+        cooldownReasonRank(reason) > cooldownReasonRank(cooldownReason)
+      ) {
+        cooldownReason = reason;
+      }
+    };
 
     if (validRecords.length > 0) {
       let anyRecordCooling = false;
@@ -283,44 +418,50 @@ function parseCpaFiles(
         }
         if (recEval.isCooling) {
           anyRecordCooling = true;
-          if (recEval.retryAfter) {
-            candidateRecoveryTimes.push(recEval.retryAfter);
-            if (!recordRetryAfter) recordRetryAfter = recEval.retryAfter;
-          }
-          if (recEval.recoverAt) {
-            candidateRecoveryTimes.push(recEval.recoverAt);
-            if (!recordRecoverAt) recordRecoverAt = recEval.recoverAt;
-          }
+          escalateReason(classifyCooldownRecord(rec));
+          if (recEval.retryAfter) retryCandidates.push(recEval.retryAfter);
+          if (recEval.recoverAt) recoverCandidates.push(recEval.recoverAt);
         }
       }
-      if (rootEval.retryAfter) candidateRecoveryTimes.push(rootEval.retryAfter);
-      if (rootEval.recoverAt) candidateRecoveryTimes.push(rootEval.recoverAt);
+      if (rootEval.retryAfter) retryCandidates.push(rootEval.retryAfter);
+      if (rootEval.recoverAt) recoverCandidates.push(rootEval.recoverAt);
 
       if (anyRecordCooling) {
         isCooling = true;
       } else if (rootEval.isCooling && !recordHasTimestamps) {
         isCooling = true;
       }
+      if (isCooling && rootEval.isCooling) {
+        escalateReason(classifyCooldownRecord(cds));
+      }
     } else {
       isCooling = rootEval.isCooling;
-      if (rootEval.retryAfter) candidateRecoveryTimes.push(rootEval.retryAfter);
-      if (rootEval.recoverAt) candidateRecoveryTimes.push(rootEval.recoverAt);
+      if (rootEval.retryAfter) retryCandidates.push(rootEval.retryAfter);
+      if (rootEval.recoverAt) recoverCandidates.push(rootEval.recoverAt);
+      if (isCooling) escalateReason(classifyCooldownRecord(cds));
     }
 
-    const validTimes = candidateRecoveryTimes
-      .map((t) => Date.parse(t))
-      .filter((ms) => Number.isFinite(ms));
-
-    const recoveryTime =
-      isCooling && validTimes.length > 0
-        ? new Date(Math.min(...validTimes)).toISOString()
+    const earliestOf = (times: string[]): string | undefined => {
+      const valid = times
+        .map((t) => Date.parse(t))
+        .filter((ms) => Number.isFinite(ms));
+      return valid.length > 0
+        ? new Date(Math.min(...valid)).toISOString()
         : undefined;
+    };
+
+    const earliestRetry = earliestOf(retryCandidates);
+    const earliestRecover = earliestOf(recoverCandidates);
+
+    const recoveryTime = isCooling
+      ? earliestOf([...retryCandidates, ...recoverCandidates])
+      : undefined;
 
     const nextRetryAfter = isCooling
-      ? (recoveryTime ?? rootEval.retryAfter ?? recordRetryAfter)
+      ? (earliestRetry ?? earliestRecover)
       : undefined;
     const nextRecoverAt = isCooling
-      ? (recoveryTime ?? rootEval.recoverAt ?? recordRecoverAt)
+      ? (earliestRecover ?? earliestRetry)
       : undefined;
 
     const updatedAt =
@@ -332,6 +473,7 @@ function parseCpaFiles(
       email,
       plan,
       cooling: isCooling,
+      cooldownReason,
       nextRetryAfter,
       nextRecoverAt,
       recoveryTime,
@@ -445,6 +587,7 @@ function buildCpaPoolResult(
         email: a.email,
         accountKey: a.accountKey,
         status: "unavailable",
+        note: a.error,
         windows: [],
       };
     }
@@ -476,6 +619,7 @@ function buildCpaPoolResult(
       accountKey: a.accountKey,
       plan: a.plan,
       status: a.cooling ? "cooling" : "active",
+      cooldownReason: a.cooling ? a.cooldownReason : undefined,
       nextRetryAfter: a.cooling ? a.nextRetryAfter : undefined,
       nextRecoverAt: a.cooling ? a.nextRecoverAt : undefined,
       windows: accWindows,
@@ -490,7 +634,8 @@ function buildCpaPoolResult(
   const updatedTimes = validAccounts
     .map((a) => (a.updatedAt ? Date.parse(a.updatedAt) : undefined))
     .filter(
-      (ms): ms is number => typeof ms === "number" && Number.isFinite(ms),
+      (ms): ms is number =>
+        typeof ms === "number" && Number.isFinite(ms) && ms > 0,
     );
   const maxUpdatedMs =
     updatedTimes.length > 0 ? Math.max(...updatedTimes) : undefined;
@@ -571,6 +716,7 @@ function applyProbeSuccess(
   const isExhausted = windows?.some(isWindowExhausted) ?? false;
   if (!isExhausted) {
     a.cooling = false;
+    a.cooldownReason = undefined;
     a.recovered = true;
     a.stale = undefined;
     a.unverified = undefined;
@@ -582,6 +728,7 @@ function applyProbeSuccess(
     a.recoveryTime = undefined;
   } else {
     a.cooling = true;
+    a.cooldownReason = "quota";
     a.recovered = undefined;
     a.stale = undefined;
     a.unverified = undefined;
@@ -592,7 +739,8 @@ function applyProbeSuccess(
     const resetTimes = exhaustedWindows
       .map((w) => (w.resetsAt ? Date.parse(w.resetsAt) : undefined))
       .filter(
-        (ms): ms is number => typeof ms === "number" && Number.isFinite(ms),
+        (ms): ms is number =>
+          typeof ms === "number" && Number.isFinite(ms) && ms > 0,
       );
     if (resetTimes.length > 0) {
       const recoveryTimestamp = new Date(Math.max(...resetTimes)).toISOString();

@@ -374,11 +374,17 @@ export type ProviderQuota = {
   notSetUp?: true;
 };
 
+/** Why a pool account is cooling: real quota/auth death, a transient
+ * overload-class blip, or a record that cannot be classified. */
+export type PoolCooldownReason = "quota" | "transient" | "unknown";
+
 export type PoolAccountDetail = {
   email?: string;
   accountKey?: string;
   plan?: string;
   status: "available" | "unavailable" | "cooling" | "active";
+  /** Present only when `status` is `cooling`. */
+  cooldownReason?: PoolCooldownReason;
   nextRetryAfter?: string;
   nextRecoverAt?: string;
   cooldowns?: Record<string, number>;
