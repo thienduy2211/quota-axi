@@ -180,6 +180,7 @@ function cooldownReasonTokens(rec: Record<string, unknown>): string[] {
     }
   };
   collect(rec.reason);
+  collect(rec.last_error);
   const lastError =
     rec.last_error && typeof rec.last_error === "object"
       ? (rec.last_error as Record<string, unknown>)
@@ -210,8 +211,13 @@ function classifyCooldownRecord(
     Number.isFinite(lastError.http_status)
       ? lastError.http_status
       : undefined;
-  if (httpStatus !== undefined && httpStatus >= 500 && httpStatus < 600) {
-    return "transient";
+  if (httpStatus !== undefined) {
+    if (httpStatus === 429 || (httpStatus >= 500 && httpStatus < 600)) {
+      return "transient";
+    }
+    if (httpStatus === 401 || httpStatus === 403) {
+      return "quota";
+    }
   }
   return "unknown";
 }
@@ -424,6 +430,8 @@ function parseCpaFiles(
         isCooling = true;
       } else if (rootEval.isCooling && !recordHasTimestamps) {
         isCooling = true;
+      }
+      if (isCooling && rootEval.isCooling) {
         escalateReason(classifyCooldownRecord(cds));
       }
     } else {
@@ -626,7 +634,8 @@ function buildCpaPoolResult(
   const updatedTimes = validAccounts
     .map((a) => (a.updatedAt ? Date.parse(a.updatedAt) : undefined))
     .filter(
-      (ms): ms is number => typeof ms === "number" && Number.isFinite(ms),
+      (ms): ms is number =>
+        typeof ms === "number" && Number.isFinite(ms) && ms > 0,
     );
   const maxUpdatedMs =
     updatedTimes.length > 0 ? Math.max(...updatedTimes) : undefined;

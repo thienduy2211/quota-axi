@@ -2016,6 +2016,118 @@ describe("Codex CPA pool aggregation", () => {
     expect(toon).not.toContain("0001-01-01");
   });
 
+  it("root-level quota cooldown is not masked by a record-level transient", async () => {
+    const cpaDir = join(tempDir, "cpa-root-quota-record-transient");
+    mkdirSync(cpaDir, { recursive: true });
+    const nowMs = Date.parse("2026-10-08T07:33:00.000Z");
+    const rootRetry = "2026-10-08T13:33:00.000Z";
+    const recordRetry = "2026-10-08T07:34:00.000Z";
+
+    writeFileSync(
+      join(cpaDir, "codex-mixed.cds"),
+      JSON.stringify({
+        auth_id: "codex-mixed.json",
+        provider: "codex",
+        status: "cooling",
+        next_retry_after: rootRetry,
+        quota: { exceeded: true },
+        records: [
+          {
+            provider: "codex",
+            status: "cooling",
+            next_retry_after: recordRetry,
+            reason: JSON.stringify({
+              error: {
+                type: "service_unavailable_error",
+                code: "server_is_overloaded",
+              },
+            }),
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({ cpaDir, nowMs, skipProbe: true });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    const acc = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-mixed.json",
+    );
+    expect(acc?.status).toBe("cooling");
+    expect(acc?.cooldownReason).toBe("quota");
+    expect(acc?.nextRetryAfter).toBe(recordRetry);
+  });
+
+  it("never renders a Go zero updated_at as state.refreshedAt", async () => {
+    const cpaDir = join(tempDir, "cpa-zero-updated-at");
+    mkdirSync(cpaDir, { recursive: true });
+    const nowMs = Date.parse("2026-10-08T07:33:00.000Z");
+
+    writeFileSync(
+      join(cpaDir, "codex-zero-updated.cds"),
+      JSON.stringify({
+        auth_id: "codex-zero-updated.json",
+        provider: "codex",
+        status: "active",
+        updated_at: "0001-01-01T00:00:00Z",
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({ cpaDir, nowMs, skipProbe: true });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    const refreshedAt = result.quota.state.refreshedAt;
+    expect(refreshedAt).toBeDefined();
+    expect(refreshedAt).not.toContain("0001-01-01");
+    expect(Date.parse(refreshedAt!)).toBeGreaterThan(0);
+  });
+
+  it("classifies cooldown reasons from last_error tokens and http_status", async () => {
+    const cpaDir = join(tempDir, "cpa-last-error-classes");
+    mkdirSync(cpaDir, { recursive: true });
+    const nowMs = Date.parse("2026-10-08T07:33:00.000Z");
+    const retry = "2026-10-08T07:34:00.000Z";
+
+    for (const [file, authId, lastError] of [
+      ["codex-string.cds", "codex-string.json", "server_is_overloaded"],
+      ["codex-typed.cds", "codex-typed.json", { type: "insufficient_quota" }],
+      ["codex-429.cds", "codex-429.json", { http_status: 429 }],
+      ["codex-401.cds", "codex-401.json", { http_status: 401 }],
+    ] as const) {
+      writeFileSync(
+        join(cpaDir, file),
+        JSON.stringify({
+          auth_id: authId,
+          provider: "codex",
+          records: [
+            {
+              provider: "codex",
+              status: "cooling",
+              next_retry_after: retry,
+              last_error: lastError,
+            },
+          ],
+        }),
+        "utf8",
+      );
+    }
+
+    const result = await readCodexPool({ cpaDir, nowMs, skipProbe: true });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    const byKey = (key: string) =>
+      result.quota.pool?.accounts.find((a) => a.accountKey === key);
+    expect(byKey("codex-string.json")?.cooldownReason).toBe("transient");
+    expect(byKey("codex-typed.json")?.cooldownReason).toBe("quota");
+    expect(byKey("codex-429.json")?.cooldownReason).toBe("transient");
+    expect(byKey("codex-401.json")?.cooldownReason).toBe("quota");
+  });
+
   it("no-CPA environment leaves provider unaffected", async () => {
     const emptyCpa = join(tempDir, "empty-nonexistent-cpa");
     process.env.CPA_DIR = emptyCpa;
