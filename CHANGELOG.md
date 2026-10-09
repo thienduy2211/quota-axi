@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.1.58](https://github.com/thienduy2211/quota-axi/compare/quota-axi-v0.1.57...quota-axi-v0.1.58) (2026-10-09)
+
+
+### Features
+
+* **providers:** add read-only Higgsfield credits and jobs provider ([#302](https://github.com/thienduy2211/quota-axi/issues/302)) ([a642b5d](https://github.com/thienduy2211/quota-axi/commit/a642b5d047633b1bde4178863317bcd81931fa28))
+* **providers:** aggregate account-pool quota for codex and agy ([#1](https://github.com/thienduy2211/quota-axi/issues/1)) ([3b8f40e](https://github.com/thienduy2211/quota-axi/commit/3b8f40e21ad60112d57c5c993a7a72b5cbfa2bc1))
+* **providers:** cross-check CPA cooling status with direct vendor probe ([#4](https://github.com/thienduy2211/quota-axi/issues/4)) ([6428123](https://github.com/thienduy2211/quota-axi/commit/6428123e064812c059d91f16c2138472215ee67a))
+* **providers:** read CPA .cds state directory for codex pool quota ([#2](https://github.com/thienduy2211/quota-axi/issues/2)) ([8005f48](https://github.com/thienduy2211/quota-axi/commit/8005f48228f15163b8dc55e53a54a4e48cfe697f))
+
+
+### Bug Fixes
+
+* **higgsfield:** expect unknown runway for a resetless full grant ([#312](https://github.com/thienduy2211/quota-axi/issues/312)) ([15ace96](https://github.com/thienduy2211/quota-axi/commit/15ace96f3b0bd14cefbbd3f45cd4946a81553b7c))
+* **pace:** fail closed to unknown runway when no bound reports a reset ([#307](https://github.com/thienduy2211/quota-axi/issues/307)) ([36dd1ef](https://github.com/thienduy2211/quota-axi/commit/36dd1ef17a80200743b0e626e3d29dad8064c766))
+* **providers:** classify codex pool cooldown reasons and report per-member retry times ([#5](https://github.com/thienduy2211/quota-axi/issues/5)) ([500b67f](https://github.com/thienduy2211/quota-axi/commit/500b67f828cf7b12fb5b004a425b1a4734c60b71))
+* **providers:** enable Antigravity cycle-average pace signals ([#308](https://github.com/thienduy2211/quota-axi/issues/308)) ([6f27edf](https://github.com/thienduy2211/quota-axi/commit/6f27edfde64d39bd8e58e639869eeb96b2156ab7))
+* **providers:** scan CPA auth json files alongside cooldown records ([#6](https://github.com/thienduy2211/quota-axi/issues/6)) ([2f84a78](https://github.com/thienduy2211/quota-axi/commit/2f84a78f3af46fc3185b45b71fe06b8c91a74c62))
+* **providers:** surface earliest recovery in codex pool headline and expire past cooldowns ([#3](https://github.com/thienduy2211/quota-axi/issues/3)) ([cfb5a85](https://github.com/thienduy2211/quota-axi/commit/cfb5a85e40e21e115eeef169a3b3ba0f03657421))
+
 ## [0.1.57](https://github.com/kunchenguid/quota-axi/compare/quota-axi-v0.1.56...quota-axi-v0.1.57) (2026-10-04)
 
 
