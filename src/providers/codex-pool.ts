@@ -367,6 +367,9 @@ function isCodexAuthJson(data: Record<string, unknown>, file: string): boolean {
   return false;
 }
 
+// Healthy CPA credentials exist only as *.json auth files without a *.cds cooldown
+// file until they cool. Read *.json to seed active accounts, then overlay *.cds
+// cooldown state onto matching accounts while keeping orphan *.cds records.
 function parseCpaFiles(
   cpaDir: string,
   nowMs: number,

@@ -28,7 +28,7 @@ This reference details the credential sources, endpoint contracts, quota window 
 ## 2. OpenAI Codex (`codex`)
 
 - **Credential Sources** (evaluated in order):
-  1. CPA pool state directory (`$CPA_DIR` or `~/.cli-proxy-api/*.cds`), falling back to the legacy pool registry (`$CODEX_REGISTRY_PATH`, else `$CODEX_HOME/accounts/registry.json`, else `~/.codex/accounts/registry.json`). When present, coalesces pool accounts and bypasses multi-account Pi discovery; cross-checks cooling accounts against a live vendor probe, or reports aggregate usage from legacy registry. Contract: [README Codex credential sources](../../README.md#provider-credential-sources).
+  1. CPA pool state directory (`$CPA_DIR` or `~/.cli-proxy-api/` for `*.json` and `*.cds`), falling back to the legacy pool registry (`$CODEX_REGISTRY_PATH`, else `$CODEX_HOME/accounts/registry.json`, else `~/.codex/accounts/registry.json`). When present, coalesces pool accounts and bypasses multi-account Pi discovery; cross-checks cooling accounts against a live vendor probe, or reports aggregate usage from legacy registry. Contract: [README Codex credential sources](../../README.md#provider-credential-sources).
   2. Native `$CODEX_HOME/auth.json` or `~/.codex/auth.json` OAuth.
   3. Pi `openai-codex` and any sibling `openai-codex-*` entries in the same Pi `auth.json`.
   4. CLI fallback via the `app-server` JSON-RPC probe.
