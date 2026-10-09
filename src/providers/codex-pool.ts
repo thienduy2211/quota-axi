@@ -318,8 +318,58 @@ type ParsedCpaAccount = {
   probeError?: string;
   windows?: QuotaWindow[];
   probed?: boolean;
+  fileName?: string;
 };
 
+function cpaIdentityKeys(fileName: string, authId?: string): Set<string> {
+  const keys = new Set<string>();
+  const addKey = (k: string | undefined): void => {
+    if (!k) return;
+    const trimmed = k.trim();
+    if (!trimmed) return;
+    keys.add(trimmed);
+    const noExt = trimmed.replace(/\.(json|cds)$/i, "");
+    keys.add(noExt);
+    const sanitized = noExt
+      .replace(/[^A-Za-z0-9._-]+/g, "_")
+      .replace(/^[._-]+|[._-]+$/g, "");
+    if (sanitized) {
+      keys.add(sanitized);
+    }
+  };
+
+  addKey(fileName);
+  addKey(authId);
+  return keys;
+}
+
+function isCodexAuthJson(data: Record<string, unknown>, file: string): boolean {
+  if (data.provider === "codex" || data.type === "codex") {
+    return true;
+  }
+  if (
+    Array.isArray(data.records) &&
+    data.records.some(
+      (r) =>
+        Boolean(r && typeof r === "object") &&
+        (r as Record<string, unknown>).provider === "codex",
+    )
+  ) {
+    return true;
+  }
+  if (
+    typeof data.provider !== "string" &&
+    typeof data.type !== "string" &&
+    file.toLowerCase().startsWith("codex")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+// Healthy CPA credentials exist only as *.json auth files without a *.cds cooldown
+// file until they cool. Read *.json to seed active accounts, then overlay *.cds
+// cooldown state onto matching accounts while keeping orphan *.cds records.
 function parseCpaFiles(
   cpaDir: string,
   nowMs: number,
@@ -331,39 +381,146 @@ function parseCpaFiles(
     entries = [];
   }
 
+  const jsonFiles = entries.filter((e) => e.endsWith(".json")).sort();
   const cdsFiles = entries.filter((e) => e.endsWith(".cds")).sort();
-  if (cdsFiles.length === 0) {
+  if (jsonFiles.length === 0 && cdsFiles.length === 0) {
     return { hasCodexFiles: false, parsedCpaAccounts: [] };
   }
 
   const parsedCpaAccounts: ParsedCpaAccount[] = [];
   let hasCodexFiles = false;
 
-  for (const file of cdsFiles) {
+  for (const file of jsonFiles) {
     const filePath = join(cpaDir, file);
     const result = readJsonFileResult(filePath);
     if (result.status === "invalid") {
-      hasCodexFiles = true;
-      parsedCpaAccounts.push({
-        authId: file.replace(/\.cds$/, ""),
-        accountKey: file.replace(/\.cds$/, ""),
-        cooling: false,
-        malformed: true,
-        error: result.error,
-      });
+      if (file.toLowerCase().startsWith("codex")) {
+        hasCodexFiles = true;
+        parsedCpaAccounts.push({
+          authId: file,
+          accountKey: file,
+          cooling: false,
+          malformed: true,
+          error: result.error,
+          fileName: file,
+        });
+      }
       continue;
     }
     if (result.status !== "success") continue;
     const raw = result.value;
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      hasCodexFiles = true;
-      parsedCpaAccounts.push({
-        authId: file.replace(/\.cds$/, ""),
-        accountKey: file.replace(/\.cds$/, ""),
-        cooling: false,
-        malformed: true,
-        error: "invalid_cds_shape",
-      });
+      if (file.toLowerCase().startsWith("codex")) {
+        hasCodexFiles = true;
+        parsedCpaAccounts.push({
+          authId: file,
+          accountKey: file,
+          cooling: false,
+          malformed: true,
+          error: "invalid_auth_shape",
+          fileName: file,
+        });
+      }
+      continue;
+    }
+
+    const authData = raw as Record<string, unknown>;
+    if (!isCodexAuthJson(authData, file)) {
+      continue;
+    }
+
+    hasCodexFiles = true;
+
+    const authId =
+      typeof authData.auth_id === "string" && authData.auth_id.trim() !== ""
+        ? authData.auth_id.trim()
+        : file;
+    const accountKey = authId;
+    const email =
+      typeof authData.email === "string" && authData.email.trim() !== ""
+        ? authData.email.trim()
+        : undefined;
+    const plan =
+      typeof authData.plan === "string" && authData.plan.trim() !== ""
+        ? authData.plan.trim()
+        : undefined;
+    const updatedAt =
+      typeof authData.updated_at === "string"
+        ? authData.updated_at
+        : typeof authData.last_refresh === "string"
+          ? authData.last_refresh
+          : undefined;
+
+    parsedCpaAccounts.push({
+      authId,
+      accountKey,
+      email,
+      plan,
+      cooling: false,
+      updatedAt,
+      fileName: file,
+    });
+  }
+
+  const matchedAccounts = new Set<ParsedCpaAccount>();
+  const findMatchingAccount = (
+    cdsFile: string,
+    cdsAuthId?: string,
+  ): ParsedCpaAccount | undefined => {
+    const cdsKeys = cpaIdentityKeys(cdsFile, cdsAuthId);
+    for (const acc of parsedCpaAccounts) {
+      if (matchedAccounts.has(acc)) continue;
+      const accKeys = cpaIdentityKeys(acc.fileName ?? acc.authId, acc.authId);
+      for (const k of cdsKeys) {
+        if (accKeys.has(k)) {
+          return acc;
+        }
+      }
+    }
+    return undefined;
+  };
+
+  for (const file of cdsFiles) {
+    const filePath = join(cpaDir, file);
+    const result = readJsonFileResult(filePath);
+    if (result.status === "invalid") {
+      const matched = findMatchingAccount(file);
+      if (matched) {
+        matched.malformed = true;
+        matched.error = result.error;
+        matchedAccounts.add(matched);
+      } else {
+        hasCodexFiles = true;
+        parsedCpaAccounts.push({
+          authId: file.replace(/\.cds$/, ""),
+          accountKey: file.replace(/\.cds$/, ""),
+          cooling: false,
+          malformed: true,
+          error: result.error,
+          fileName: file,
+        });
+      }
+      continue;
+    }
+    if (result.status !== "success") continue;
+    const raw = result.value;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      const matched = findMatchingAccount(file);
+      if (matched) {
+        matched.malformed = true;
+        matched.error = "invalid_cds_shape";
+        matchedAccounts.add(matched);
+      } else {
+        hasCodexFiles = true;
+        parsedCpaAccounts.push({
+          authId: file.replace(/\.cds$/, ""),
+          accountKey: file.replace(/\.cds$/, ""),
+          cooling: false,
+          malformed: true,
+          error: "invalid_cds_shape",
+          fileName: file,
+        });
+      }
       continue;
     }
 
@@ -372,7 +529,15 @@ function parseCpaFiles(
       ? (cds.records as Array<Record<string, unknown>>)
       : [];
 
+    const rawCdsAuthId =
+      typeof cds.auth_id === "string" && cds.auth_id.trim() !== ""
+        ? cds.auth_id.trim()
+        : undefined;
+
+    const matchedAccount = findMatchingAccount(file, rawCdsAuthId);
+
     const isCodex =
+      Boolean(matchedAccount) ||
       cds.provider === "codex" ||
       records.some((r) => r && typeof r === "object" && r.provider === "codex");
     if (!isCodex) {
@@ -380,14 +545,6 @@ function parseCpaFiles(
     }
 
     hasCodexFiles = true;
-
-    const authId =
-      typeof cds.auth_id === "string" && cds.auth_id.trim() !== ""
-        ? cds.auth_id
-        : file.replace(/\.cds$/, "");
-    const accountKey = authId;
-    const email = typeof cds.email === "string" ? cds.email : undefined;
-    const plan = typeof cds.plan === "string" ? cds.plan : undefined;
 
     const rootEval = evaluateCooldownRecord(cds, nowMs);
     const validRecords = records.filter((r): r is Record<string, unknown> =>
@@ -466,19 +623,46 @@ function parseCpaFiles(
 
     const updatedAt =
       typeof cds.updated_at === "string" ? cds.updated_at : undefined;
+    const email = typeof cds.email === "string" ? cds.email : undefined;
+    const plan = typeof cds.plan === "string" ? cds.plan : undefined;
 
-    parsedCpaAccounts.push({
-      authId,
-      accountKey,
-      email,
-      plan,
-      cooling: isCooling,
-      cooldownReason,
-      nextRetryAfter,
-      nextRecoverAt,
-      recoveryTime,
-      updatedAt,
-    });
+    if (matchedAccount) {
+      matchedAccounts.add(matchedAccount);
+      matchedAccount.cooling = isCooling;
+      matchedAccount.cooldownReason = cooldownReason;
+      matchedAccount.nextRetryAfter = nextRetryAfter;
+      matchedAccount.nextRecoverAt = nextRecoverAt;
+      matchedAccount.recoveryTime = recoveryTime;
+      if (updatedAt) {
+        matchedAccount.updatedAt = updatedAt;
+      }
+      if (!matchedAccount.email && email) {
+        matchedAccount.email = email;
+      }
+      if (!matchedAccount.plan && plan) {
+        matchedAccount.plan = plan;
+      }
+      if (rawCdsAuthId) {
+        matchedAccount.authId = rawCdsAuthId;
+        matchedAccount.accountKey = rawCdsAuthId;
+      }
+    } else {
+      const authId = rawCdsAuthId ?? file.replace(/\.cds$/, "");
+      const accountKey = authId;
+      parsedCpaAccounts.push({
+        authId,
+        accountKey,
+        email,
+        plan,
+        cooling: isCooling,
+        cooldownReason,
+        nextRetryAfter,
+        nextRecoverAt,
+        recoveryTime,
+        updatedAt,
+        fileName: file,
+      });
+    }
   }
 
   return { hasCodexFiles, parsedCpaAccounts };
@@ -507,7 +691,11 @@ function buildCpaPoolResult(
       : undefined;
 
   const activeAccount =
-    validAccounts.find((a) => !a.cooling) ?? validAccounts[0];
+    validAccounts.find(
+      (a) => !a.cooling && a.windows && a.windows.length > 0,
+    ) ??
+    validAccounts.find((a) => !a.cooling) ??
+    validAccounts[0];
 
   const headlineWindows: QuotaWindow[] =
     activeAccount?.windows &&

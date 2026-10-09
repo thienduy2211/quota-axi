@@ -2156,4 +2156,440 @@ describe("Codex CPA pool aggregation", () => {
     expect(result.source).toBe("registry");
     expect(result.quota.pool?.accounts[0].accountKey).toBe("acc-reg");
   });
+
+  it("json-only active account + cds cooling account yields pool fresh and serving, not unavailable", async () => {
+    const cpaDir = join(tempDir, "cpa-json-active-cds-cooling");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const coolingTime = "2026-10-14T10:00:00.000Z";
+
+    // Healthy active account with only a *.json auth file (no .cds file)
+    writeFileSync(
+      join(cpaDir, "codex-active-open.json"),
+      JSON.stringify({
+        type: "codex",
+        email: "open-user@example.com",
+        priority: 10,
+      }),
+      "utf8",
+    );
+
+    // Cooling account with a *.cds file
+    writeFileSync(
+      join(cpaDir, "codex-cooling-only.cds"),
+      JSON.stringify({
+        auth_id: "codex-cooling-only.json",
+        provider: "codex",
+        records: [
+          {
+            provider: "codex",
+            status: "cooling",
+            next_retry_after: coolingTime,
+            quota: {
+              exceeded: true,
+              next_recover_at: coolingTime,
+            },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({ cpaDir, skipProbe: true });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.source).toBe("cpa");
+    expect(result.path).toBe(cpaDir);
+
+    // Headline status is fresh because the healthy .json account is open
+    expect(result.quota.state.status).toBe("fresh");
+    expect(result.quota.state.stale).toBe(false);
+    expect(result.quota.state.error).toBeUndefined();
+
+    // Headline window reports pool serving with earliest recovery surfaced
+    const headline = result.quota.windows[0];
+    expect(headline).toBeDefined();
+    expect(headline.id).toBe("pool");
+    expect(headline.resetText).toBe("pool serving");
+    expect(headline.resetsAt).toBe(coolingTime);
+
+    // Pool accounts contain both the active .json account and the cooling .cds account
+    expect(result.quota.pool?.accounts).toHaveLength(2);
+
+    const activeAcc = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-active-open.json",
+    );
+    expect(activeAcc).toBeDefined();
+    expect(activeAcc?.status).toBe("active");
+    expect(activeAcc?.email).toBe("open-user@example.com");
+    expect(activeAcc?.nextRecoverAt).toBeUndefined();
+    expect(activeAcc?.nextRetryAfter).toBeUndefined();
+
+    const coolingAcc = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-cooling-only.json",
+    );
+    expect(coolingAcc).toBeDefined();
+    expect(coolingAcc?.status).toBe("cooling");
+    expect(coolingAcc?.cooldownReason).toBe("quota");
+    expect(coolingAcc?.nextRecoverAt).toBe(coolingTime);
+
+    // Active account attempt is success, cooling attempt is skipped
+    const activeAttempt = result.quota.attempts?.find((a) =>
+      a.source.includes("codex-active-open.json"),
+    );
+    expect(activeAttempt?.status).toBe("success");
+
+    const coolingAttempt = result.quota.attempts?.find((a) =>
+      a.source.includes("codex-cooling-only.json"),
+    );
+    expect(coolingAttempt?.status).toBe("skipped");
+    expect(coolingAttempt?.error).toBe("cooling");
+  });
+
+  it("all-cds-all-cooling yields status unavailable", async () => {
+    const cpaDir = join(tempDir, "cpa-all-cooling-unavailable");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const recoveryTime = "2026-10-15T12:00:00.000Z";
+
+    writeFileSync(
+      join(cpaDir, "codex-cooling-1.json"),
+      JSON.stringify({ type: "codex", email: "user1@example.com" }),
+      "utf8",
+    );
+    writeFileSync(
+      join(cpaDir, "codex-cooling-1.cds"),
+      JSON.stringify({
+        auth_id: "codex-cooling-1.json",
+        provider: "codex",
+        records: [
+          {
+            provider: "codex",
+            status: "cooling",
+            next_retry_after: recoveryTime,
+            quota: { exceeded: true, next_recover_at: recoveryTime },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    writeFileSync(
+      join(cpaDir, "codex-cooling-2.json"),
+      JSON.stringify({ type: "codex", email: "user2@example.com" }),
+      "utf8",
+    );
+    writeFileSync(
+      join(cpaDir, "codex-cooling-2.cds"),
+      JSON.stringify({
+        auth_id: "codex-cooling-2.json",
+        provider: "codex",
+        records: [
+          {
+            provider: "codex",
+            status: "cooling",
+            next_retry_after: recoveryTime,
+            quota: { exceeded: true, next_recover_at: recoveryTime },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({ cpaDir, skipProbe: true });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.quota.state.status).toBe("unavailable");
+    expect(result.quota.state.error).toBe(`cooling until ${recoveryTime}`);
+    expect(result.quota.state.retryAfter).toBe(recoveryTime);
+    expect(result.quota.windows[0].resetText).toBe(
+      `cooling until ${recoveryTime}`,
+    );
+    expect(result.quota.windows[0].resetsAt).toBe(recoveryTime);
+    expect(result.quota.pool?.accounts).toHaveLength(2);
+    expect(
+      result.quota.pool?.accounts.every((a) => a.status === "cooling"),
+    ).toBe(true);
+  });
+
+  it("mixed active and cooling accounts accurately reflects real pool (2026-10-09 incident fixture)", async () => {
+    const cpaDir = join(tempDir, "cpa-incident-2026-10-09");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const quotaResetTime = "2026-10-14T03:30:46.000Z";
+
+    // 1. Cooling credential 1: vothienduy221183
+    writeFileSync(
+      join(cpaDir, "codex-7541c7ee-vothienduy221183@gmail.com-team.json"),
+      JSON.stringify({
+        type: "codex",
+        email: "vothienduy221183@gmail.com",
+        priority: 10,
+        account_id: "a76003c9-8536-46be-a858-b84018ffe748",
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      join(cpaDir, "codex-7541c7ee-vothienduy221183_gmail.com-team.cds"),
+      JSON.stringify({
+        auth_id: "codex-7541c7ee-vothienduy221183@gmail.com-team.json",
+        provider: "codex",
+        records: [
+          {
+            provider: "codex",
+            status: "cooling",
+            next_retry_after: quotaResetTime,
+            quota: { exceeded: true, next_recover_at: quotaResetTime },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    // 2. Cooling credential 2: vtduy2211
+    writeFileSync(
+      join(cpaDir, "codex-7541c7ee-vtduy2211@gmail.com-team.json"),
+      JSON.stringify({
+        type: "codex",
+        email: "vtduy2211@gmail.com",
+        priority: 10,
+        account_id: "a76003c9-8536-46be-a858-b84018ffe748",
+      }),
+      "utf8",
+    );
+    writeFileSync(
+      join(cpaDir, "codex-7541c7ee-vtduy2211_gmail.com-team.cds"),
+      JSON.stringify({
+        auth_id: "codex-7541c7ee-vtduy2211@gmail.com-team.json",
+        provider: "codex",
+        records: [
+          {
+            provider: "codex",
+            status: "cooling",
+            next_retry_after: quotaResetTime,
+            quota: { exceeded: true, next_recover_at: quotaResetTime },
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    // 3. Healthy open credential: vtdtdah001 (NO .cds file)
+    writeFileSync(
+      join(cpaDir, "codex-dbd594c5-vtdtdah001@gmail.com-team.json"),
+      JSON.stringify({
+        type: "codex",
+        email: "vtdtdah001@gmail.com",
+        priority: 10,
+        account_id: "5fb0713d-1474-4b6b-8dda-e03c8c43a061",
+      }),
+      "utf8",
+    );
+
+    // 4. Healthy open standby: codex-main (NO .cds file)
+    writeFileSync(
+      join(cpaDir, "codex-main.json"),
+      JSON.stringify({
+        type: "codex",
+        email: "linhhot175@gmail.com",
+        priority: -10,
+        account_id: "d48aeac2-1cd5-448a-897d-85ce00d9431d",
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({ cpaDir, skipProbe: true });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    // Fixed bug: Pool was reported unavailable previously; now reports fresh!
+    expect(result.quota.state.status).toBe("fresh");
+    expect(result.quota.state.stale).toBe(false);
+    expect(result.quota.windows[0].resetText).toBe("pool serving");
+
+    // Pool details correctly identify all 4 accounts
+    expect(result.quota.pool?.accounts).toHaveLength(4);
+
+    const coolingAccounts = result.quota.pool?.accounts.filter(
+      (a) => a.status === "cooling",
+    );
+    expect(coolingAccounts).toHaveLength(2);
+
+    const activeAccounts = result.quota.pool?.accounts.filter(
+      (a) => a.status === "active",
+    );
+    expect(activeAccounts).toHaveLength(2);
+
+    // Active accounts are vtdtdah001 and codex-main
+    expect(
+      activeAccounts?.some(
+        (a) => a.accountKey === "codex-dbd594c5-vtdtdah001@gmail.com-team.json",
+      ),
+    ).toBe(true);
+    expect(
+      activeAccounts?.some((a) => a.accountKey === "codex-main.json"),
+    ).toBe(true);
+  });
+
+  it(".cds without .json is handled as a valid account record (stale-auth edge)", async () => {
+    const cpaDir = join(tempDir, "cpa-cds-without-json");
+    mkdirSync(cpaDir, { recursive: true });
+
+    // Open .json account
+    writeFileSync(
+      join(cpaDir, "codex-existing.json"),
+      JSON.stringify({ type: "codex", email: "existing@example.com" }),
+      "utf8",
+    );
+
+    // Stale/orphaned .cds account without a matching .json file
+    writeFileSync(
+      join(cpaDir, "codex-orphaned.cds"),
+      JSON.stringify({
+        auth_id: "codex-orphaned.json",
+        provider: "codex",
+        status: "cooling",
+        records: [
+          {
+            provider: "codex",
+            status: "cooling",
+            next_retry_after: "2026-10-18T00:00:00.000Z",
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({ cpaDir, skipProbe: true });
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    expect(result.quota.pool?.accounts).toHaveLength(2);
+
+    const orphaned = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-orphaned.json",
+    );
+    expect(orphaned).toBeDefined();
+    expect(orphaned?.status).toBe("cooling");
+
+    const existing = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-existing.json",
+    );
+    expect(existing).toBeDefined();
+    expect(existing?.status).toBe("active");
+
+    // Overall pool is fresh because existing is active
+    expect(result.quota.state.status).toBe("fresh");
+  });
+
+  it("missing or empty auth dir yields safe no-crash result", async () => {
+    // 1. Non-existent CPA dir with non-existent registry
+    const nonExistentDir = join(tempDir, "nonexistent-dir-12345");
+    const resultMissing = await readCodexPool({
+      cpaDir: nonExistentDir,
+      registryPath: join(tempDir, "nonexistent-reg.json"),
+    });
+    expect(resultMissing.kind).toBe("missing");
+
+    // 2. Empty CPA dir with non-existent registry
+    const emptyDir = join(tempDir, "empty-cpa-dir");
+    mkdirSync(emptyDir, { recursive: true });
+    const resultEmpty = await readCodexPool({
+      cpaDir: emptyDir,
+      registryPath: join(tempDir, "nonexistent-reg.json"),
+    });
+    expect(resultEmpty.kind).toBe("missing");
+  });
+
+  it("non-codex *.json and *.cds files in auth dir are ignored", async () => {
+    const cpaDir = join(tempDir, "cpa-non-codex-files");
+    mkdirSync(cpaDir, { recursive: true });
+
+    writeFileSync(
+      join(cpaDir, "devin-user.json"),
+      JSON.stringify({ type: "devin", email: "devin@example.com" }),
+      "utf8",
+    );
+    writeFileSync(
+      join(cpaDir, "xai.json"),
+      JSON.stringify({ type: "xai", email: "xai@example.com" }),
+      "utf8",
+    );
+    writeFileSync(
+      join(cpaDir, "xai.cds"),
+      JSON.stringify({ provider: "xai", status: "active" }),
+      "utf8",
+    );
+
+    const result = await readCodexPool({
+      cpaDir,
+      registryPath: join(tempDir, "fallback-missing.json"),
+    });
+    expect(result.kind).toBe("missing");
+  });
+
+  it("probing failed cooling accounts preserves active .json account availability", async () => {
+    const cpaDir = join(tempDir, "cpa-failed-probe-mixed");
+    mkdirSync(cpaDir, { recursive: true });
+
+    const nowMs = 1_770_000_000_000;
+    const futureCooling = new Date(nowMs + 86400 * 1000).toISOString();
+
+    // Active .json account
+    writeFileSync(
+      join(cpaDir, "codex-active.json"),
+      JSON.stringify({ type: "codex", email: "healthy@example.com" }),
+      "utf8",
+    );
+
+    // Cooling account with .cds
+    writeFileSync(
+      join(cpaDir, "codex-cooling.cds"),
+      JSON.stringify({
+        auth_id: "codex-cooling.json",
+        provider: "codex",
+        records: [
+          {
+            provider: "codex",
+            status: "cooling",
+            next_retry_after: futureCooling,
+          },
+        ],
+      }),
+      "utf8",
+    );
+
+    const probeCalls: unknown[] = [];
+    const result = await readCodexPool({
+      cpaDir,
+      nowMs,
+      probe: async (context) => {
+        probeCalls.push(context);
+        return { status: "failed", error: "Selected model is at capacity" };
+      },
+    });
+
+    expect(result.kind).toBe("success");
+    if (result.kind !== "success") return;
+
+    // Only the cooling account was probed
+    expect(probeCalls).toHaveLength(1);
+
+    // Even though the probe on the cooling account failed, pool remains fresh due to the active account!
+    expect(result.quota.state.status).toBe("fresh");
+    expect(result.quota.windows[0].resetText).toBe("pool serving");
+
+    const coolingAcc = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-cooling.json",
+    );
+    expect(coolingAcc?.status).toBe("cooling");
+    expect(coolingAcc?.unverified).toBe(true);
+
+    const activeAcc = result.quota.pool?.accounts.find(
+      (a) => a.accountKey === "codex-active.json",
+    );
+    expect(activeAcc?.status).toBe("active");
+  });
 });
